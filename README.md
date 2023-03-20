@@ -2,7 +2,7 @@
 
 ## CoLT5 Attention - Pytorch (wip)
 
-Implementation of the conditionally routed efficient attention in the proposed <a href="https://arxiv.org/abs/2303.09752">CoLT5</a> architecture, in Pytorch
+Implementation of the conditionally routed efficient attention in the proposed <a href="https://arxiv.org/abs/2303.09752">CoLT5</a> architecture, in Pytorch. Besides their routing, which is based on normalizing the scores and weighting the outputs of the "heavy" modules based on <a href="https://arxiv.org/abs/2211.01267">this paper</a>, will also try using sinkhorn for differentible topk, as I've seen in some mixture of experts papers.
 
 ## Citations
 
