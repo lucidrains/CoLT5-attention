@@ -1,4 +1,4 @@
-<img src="./colt5.png" width="450px"></img>
+<img src="./colt5.png" width="400px"></img>
 
 ## CoLT5 Attention - Pytorch (wip)
 

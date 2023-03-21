@@ -17,6 +17,7 @@ setup(
   ],
   install_requires=[
     'einops>=0.6.0',
+    'local-attention>=1.8.4',
     'torch>=1.10'
   ],
   classifiers=[
