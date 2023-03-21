@@ -49,15 +49,32 @@ class Attention(nn.Module):
         dim_hidden = dim_head * heads
 
         self.norm = RMSNorm(dim)
-        self.to_qkv = nn.Linear(dim, dim_hidden * 3, bias = False)
+        self.to_q = nn.Linear(dim, dim_hidden, bias = False)
+        self.to_kv = nn.Linear(dim, dim_hidden * 2, bias = False)
         self.to_out = nn.Linear(dim_hidden, dim, bias = False)
 
-    def forward(self, x, mask = None):
+    def forward(
+        self,
+        x,
+        context = None,
+        mask = None,
+        normalized_scores_kv = None
+    ):
         h = self.heads
 
         x = self.norm(x)
-        q, k, v = self.to_qkv(x).chunk(3, dim = -1)
+
+        if exists(context):
+            context = self.norm(context)
+
+        context = default(context, x)
+
+        q, k, v = (self.to_q(x), *self.to_kv(context).chunk(2, dim = -1))
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = self.heads), (q, k, v))
+
+        if exists(normalized_scores_kv):
+            # in paper, not sure how they passed back the signal from heavy attention to normalized scores for key/values. just multiply the values by the normalized kv scores for now
+            v = v * rearrange(normalized_scores_kv, 'b n -> b 1 n 1')
 
         q = q * self.scale
         sim = einsum('b h i d, b h j d -> b h i j', q, k)
@@ -178,14 +195,16 @@ class ConditionalRoutedAttention(nn.Module):
         self,
         dim,
         *,
-        num_heavy_tokens,
+        num_heavy_tokens_q,
+        num_heavy_tokens_kv,
         dim_head = 64,
         heads = 8,
         light_window_size = 128,
         router_straight_through = True # would make sure all normalized scores are 1., still differentiable
     ):
         super().__init__()
-        self.num_heavy_tokens = num_heavy_tokens
+        self.num_heavy_tokens_q = num_heavy_tokens_q
+        self.num_heavy_tokens_kv = num_heavy_tokens_kv
 
         self.light_attn = LocalMHA(
             dim = dim,
@@ -197,7 +216,12 @@ class ConditionalRoutedAttention(nn.Module):
 
         # for now, just do qkv for starters, need to separate to q and kv
 
-        self.qkv_router = DifferentiableTopKRouter(
+        self.q_router = DifferentiableTopKRouter(
+            dim = dim,
+            straight_through = router_straight_through
+        )
+
+        self.kv_router = DifferentiableTopKRouter(
             dim = dim,
             straight_through = router_straight_through
         )
@@ -212,10 +236,14 @@ class ConditionalRoutedAttention(nn.Module):
         self,
         x,
         *,
-        num_heavy_tokens = None,
+        num_heavy_tokens_q = None,
+        num_heavy_tokens_kv = None,
         mask = None
     ):
-        batch, device, num_heavy_tokens = x.shape[0], x.device, default(num_heavy_tokens, self.num_heavy_tokens)
+        batch, device = x.shape[0], x.device
+
+        num_heavy_tokens_q = default(num_heavy_tokens_q, self.num_heavy_tokens_q)
+        num_heavy_tokens_kv = default(num_heavy_tokens_kv, self.num_heavy_tokens_kv)
 
         batch_range = torch.arange(batch, device = device)
         batch_range = rearrange(batch_range, 'b -> b 1')
@@ -226,20 +254,28 @@ class ConditionalRoutedAttention(nn.Module):
 
         # route tokens appropriately for heavy branch
 
-        normalized_scores, indices = self.qkv_router(x, num_tokens = num_heavy_tokens)
+        normalized_scores_q, indices_q = self.q_router(x, num_tokens = num_heavy_tokens_q)
+        normalized_scores_kv, indices_kv = self.kv_router(x, num_tokens = num_heavy_tokens_kv)
 
         # select the tokens to be routed to heavier feedforward (hidden dimension is 4 times model dimensions)
 
-        routed_tokens = x[batch_range, indices]
+        routed_tokens_q = x[batch_range, indices_q]
+        routed_tokens_kv = x[batch_range, indices_q]
 
         # do the heavier branch with only routed tokens
 
-        routed_tokens_out = self.heavy_attn(routed_tokens) * rearrange(normalized_scores, '... -> ... 1')
+        routed_tokens_out = self.heavy_attn(
+            routed_tokens_q,
+            context = routed_tokens_kv,
+            normalized_scores_kv = normalized_scores_kv
+        )
+
+        routed_tokens_out = routed_tokens_out * rearrange(normalized_scores_q, '... -> ... 1')
 
         # scatter back the output of the heavy feedforward branch
 
         heavy_out = torch.zeros_like(x)
-        heavy_out[batch_range, indices] = routed_tokens_out
+        heavy_out[batch_range, indices_q] = routed_tokens_out
 
         # sum light and heavy branches
 
@@ -252,7 +288,8 @@ class ConditionalRoutedTransformerBlock(nn.Module):
         self,
         dim,
         *,
-        num_heavy_attn_tokens,
+        num_heavy_attn_tokens_q,
+        num_heavy_attn_tokens_kv,
         num_heavy_ff_tokens,
         dim_head = 64,
         heads = 8,
@@ -260,9 +297,6 @@ class ConditionalRoutedTransformerBlock(nn.Module):
         heavy_ff_mult = 4,
     ):
         super().__init__()
-        self.num_heavy_attn_tokens = num_heavy_attn_tokens
-        self.num_heavy_ff_tokens = num_heavy_ff_tokens
-
         self.conditional_ff = ConditionalRoutedFeedForward(
             dim,
             num_heavy_tokens = num_heavy_ff_tokens,
@@ -272,7 +306,8 @@ class ConditionalRoutedTransformerBlock(nn.Module):
 
         self.conditional_attn = ConditionalRoutedAttention(
             dim,
-            num_heavy_tokens = num_heavy_attn_tokens,
+            num_heavy_tokens_q = num_heavy_attn_tokens_q,
+            num_heavy_tokens_kv = num_heavy_attn_tokens_kv,
             dim_head = dim_head,
             heads = heads
         )
@@ -281,9 +316,10 @@ class ConditionalRoutedTransformerBlock(nn.Module):
         self,
         x,
         mask = None,
-        num_heavy_attn_tokens = None,
+        num_heavy_attn_tokens_q = None,
+        num_heavy_attn_tokens_kv = None,
         num_heavy_ff_tokens = None
     ):
-        x = self.conditional_attn(x, mask = mask, num_heavy_tokens = num_heavy_attn_tokens) + x
+        x = self.conditional_attn(x, mask = mask, num_heavy_tokens_q = num_heavy_attn_tokens_q, num_heavy_tokens_kv = num_heavy_attn_tokens_kv) + x
         x = self.conditional_ff(x, num_heavy_tokens = num_heavy_ff_tokens) + x
         return x
