@@ -1,4 +1,4 @@
-from colt5_attention.attention import (
+from colt5_attention.transformer_block import (
     ConditionalRoutedFeedForward,
     ConditionalRoutedAttention,
     ConditionalRoutedTransformerBlock
