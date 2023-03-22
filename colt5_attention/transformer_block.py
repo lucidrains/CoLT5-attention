@@ -216,7 +216,7 @@ class ConditionalRoutedAttention(nn.Module):
         num_heavy_tokens_kv,
         light_dim_head = 64,
         light_heads = 8,
-        light_window_size = 128,
+        light_window_size = 128,       # each token would see ~ 64 tokens either way to left or right
         heavy_dim_head = 64,
         heavy_heads = 8,
         router_straight_through = True # would make sure all normalized scores are 1., still differentiable
@@ -229,8 +229,12 @@ class ConditionalRoutedAttention(nn.Module):
             dim = dim,
             dim_head = light_dim_head,
             heads = light_heads,
-            window_size = light_window_size,
-            prenorm = True
+            window_size = light_window_size // 2,
+            prenorm = True,
+            causal = False,
+            use_rotary_pos_emb = False,
+            look_backward = 1,
+            look_forward = 1
         )
 
         # for now, just do qkv for starters, need to separate to q and kv

@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
   name = 'CoLT5-attention',
   packages = find_packages(),
-  version = '0.0.4',
+  version = '0.0.5',
   license='MIT',
   description = 'Conditionally Routed Attention',
   long_description_content_type = 'text/markdown',
@@ -17,7 +17,7 @@ setup(
   ],
   install_requires=[
     'einops>=0.6.0',
-    'local-attention>=1.8.4',
+    'local-attention>=1.8.5',
     'torch>=1.10'
   ],
   classifiers=[
