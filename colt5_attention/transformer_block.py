@@ -214,9 +214,11 @@ class ConditionalRoutedAttention(nn.Module):
         *,
         num_heavy_tokens_q,
         num_heavy_tokens_kv,
-        dim_head = 64,
-        heads = 8,
+        light_dim_head = 64,
+        light_heads = 8,
         light_window_size = 128,
+        heavy_dim_head = 64,
+        heavy_heads = 8,
         router_straight_through = True # would make sure all normalized scores are 1., still differentiable
     ):
         super().__init__()
@@ -225,8 +227,8 @@ class ConditionalRoutedAttention(nn.Module):
 
         self.light_attn = LocalMHA(
             dim = dim,
-            dim_head = dim_head,
-            heads = heads,
+            dim_head = light_dim_head,
+            heads = light_heads,
             window_size = light_window_size,
             prenorm = True
         )
@@ -245,8 +247,8 @@ class ConditionalRoutedAttention(nn.Module):
 
         self.heavy_attn = Attention(
             dim = dim,
-            dim_head = dim_head,
-            heads = heads
+            dim_head = heavy_dim_head,
+            heads = heavy_heads
         )
 
     def forward(
@@ -315,8 +317,11 @@ class ConditionalRoutedTransformerBlock(nn.Module):
         num_heavy_attn_tokens_q,
         num_heavy_attn_tokens_kv,
         num_heavy_ff_tokens,
-        dim_head = 64,
-        heads = 8,
+        light_dim_head = 64,
+        light_heads = 8,
+        light_window_size = 128,
+        heavy_dim_head = 64,
+        heavy_heads = 8,
         light_ff_mult = 0.5,
         heavy_ff_mult = 4,
     ):
@@ -330,10 +335,13 @@ class ConditionalRoutedTransformerBlock(nn.Module):
 
         self.conditional_attn = ConditionalRoutedAttention(
             dim,
+            light_dim_head = light_dim_head,
+            light_heads = light_heads,
+            light_window_size = light_window_size,
+            heavy_dim_head = heavy_dim_head,
+            heavy_heads = heavy_heads,
             num_heavy_tokens_q = num_heavy_attn_tokens_q,
             num_heavy_tokens_kv = num_heavy_attn_tokens_kv,
-            dim_head = dim_head,
-            heads = heads
         )
 
     def forward(

@@ -26,28 +26,36 @@ from colt5_attention import (
     ConditionalRoutedTransformerBlock
 )
 
-# mock input, say it is 8192 length
+# mock input, say it is 32768 length
 
-tokens = torch.randn(2, 8192, 512)
-mask = torch.ones(2, 8192).bool()  # can handle variable lengthed sequences
+tokens = torch.randn(2, 32768, 512)
+mask = torch.ones(2, 32768).bool()  # can handle variable lengthed sequences
 
 # feedforward
 
 ff = ConditionalRoutedFeedForward(
     dim = 512,
-    num_heavy_tokens = 1024   # heavy branch receives only 1024 routed tokens of 8192
+    light_ff_mult = 0.5,      # hidden dimension ratio of light branch
+    heavy_ff_mult = 4,        # hidden dimension ratio of heavy branch
+    num_heavy_tokens = 1024   # heavy branch receives only 1024 routed tokens of 32768
 )
 
-ff_out = ff(tokens, mask = mask)  # (2, 8192, 512) - light and heavy branch summed
+ff_out = ff(tokens, mask = mask)  # (2, 32768, 512) - light and heavy branch summed
 
 # attention
 
 attn = ConditionalRoutedAttention(
     dim = 512,
-    num_heavy_tokens = 1024   # heavy branch receives only 1024 routed tokens of 8192
+    light_dim_head = 64,       # attention head dimension of light branch
+    light_heads = 8,           # number of attention heads for light branch
+    light_window_size = 128,   # local attention receptive field for light
+    heavy_dim_head = 64,       # attention head dimension of heavy branch
+    heavy_heads = 8,           # number of attention heads for heavy branch
+    num_heavy_tokens_q = 1024, # heavy branch receives only 1024 routed tokens of 32768
+    num_heavy_tokens_kv = 1024 # heavy branch receives only 1024 routed tokens of 32768
 )
 
-attn_out = attn(tokens, mask = mask) # (2, 8192, 512) - light and heavy branch summed
+attn_out = attn(tokens, mask = mask) # (2, 32768, 512) - light and heavy branch summed
 
 # both attention and feedforward with residual
 # the complete transformer block
@@ -55,11 +63,19 @@ attn_out = attn(tokens, mask = mask) # (2, 8192, 512) - light and heavy branch s
 
 block = ConditionalRoutedTransformerBlock(
     dim = 512,
+    light_dim_head = 64,
+    light_heads = 8,
+    light_window_size = 128,
+    heavy_dim_head = 64,
+    heavy_heads = 8,
+    light_ff_mult = 0.5,
+    heavy_ff_mult = 4,
     num_heavy_ff_tokens = 1024,
-    num_heavy_attn_tokens = 1024
+    num_heavy_attn_tokens_q = 1024,
+    num_heavy_attn_tokens_kv = 1024
 )
 
-block_out = block(tokens, mask = mask) # (2, 8192, 512)
+block_out = block(tokens, mask = mask) # (2, 32768, 512)
 ```
 
 
