@@ -80,7 +80,7 @@ block_out = block(tokens, mask = mask) # (2, 32768, 512)
 
 ## Todo
 
-- [ ] add the linear programming iterative method from Qian et al, as in paper, as another router
+- [ ] add the coordinate descent method as another router
 
 ## Citations
 
