@@ -13,6 +13,13 @@ def exists(val):
 def default(val, d):
     return val if exists(val) else d
 
+# tensor helpers
+
+def create_batch_range(t):
+    b, device = t.shape[0], t.device
+    batch_range = torch.arange(b, device = device)
+    return rearrange(batch_range, 'b -> b 1')
+
 # normalization
 
 class RMSNorm(nn.Module):
@@ -108,6 +115,7 @@ class DifferentiableTopKRouter(nn.Module):
         x,
         *,
         num_tokens,
+        mask = None,
         temperature = 1.
     ):
         assert temperature > 0
@@ -116,7 +124,11 @@ class DifferentiableTopKRouter(nn.Module):
 
         scores = scores / temperature
 
-        scores, indices = scores.sort(dim = -1, descending = True)
+        if exists(mask):
+            mask_value = -torch.finfo(scores.dtype).max
+            scores = scores.masked_fill(~mask, mask_value / 2)
+
+        scores, indices = scores.sort(dim = -1)
 
         scores = scores - scores.amax(dim = -1, keepdim = True).detach()
 
@@ -129,6 +141,11 @@ class DifferentiableTopKRouter(nn.Module):
         if self.straight_through:
             # this would make sure all normalized scores returned are 1., but still differentiable using straight-through trick
             selected_scores = selected_scores + (1. - selected_scores).detach()
+
+            if exists(mask):
+                batch_range = create_batch_range(x)
+                selected_mask = mask[batch_range, selected_indices]
+                selected_scores = selected_scores.masked_fill(~selected_mask, 0.)
 
         return selected_scores, selected_indices
 
@@ -158,12 +175,12 @@ class ConditionalRoutedFeedForward(nn.Module):
     def forward(
         self,
         x,
+        mask = None,
         num_heavy_tokens = None
     ):
-        batch, device, num_heavy_tokens = x.shape[0], x.device, default(num_heavy_tokens, self.num_heavy_tokens)
+        device, num_heavy_tokens = x.device, default(num_heavy_tokens, self.num_heavy_tokens)
 
-        batch_range = torch.arange(batch, device = device)
-        batch_range = rearrange(batch_range, 'b -> b 1')
+        batch_range = create_batch_range(x)
 
         # light feedforward sees all the tokens (hidden dimension is only 1/2 of model dimensions)
 
@@ -171,7 +188,7 @@ class ConditionalRoutedFeedForward(nn.Module):
 
         # route tokens appropriately for heavy branch
 
-        normalized_scores, indices = self.router(x, num_tokens = num_heavy_tokens)
+        normalized_scores, indices = self.router(x, num_tokens = num_heavy_tokens, mask = mask)
 
         # select the tokens to be routed to heavier feedforward (hidden dimension is 4 times model dimensions)
 
@@ -254,18 +271,25 @@ class ConditionalRoutedAttention(nn.Module):
 
         # route tokens appropriately for heavy branch
 
-        normalized_scores_q, indices_q = self.q_router(x, num_tokens = num_heavy_tokens_q)
-        normalized_scores_kv, indices_kv = self.kv_router(x, num_tokens = num_heavy_tokens_kv)
+        normalized_scores_q, indices_q = self.q_router(x, num_tokens = num_heavy_tokens_q, mask = mask)
+        normalized_scores_kv, indices_kv = self.kv_router(x, num_tokens = num_heavy_tokens_kv, mask = mask)
 
         # select the tokens to be routed to heavier feedforward (hidden dimension is 4 times model dimensions)
 
         routed_tokens_q = x[batch_range, indices_q]
-        routed_tokens_kv = x[batch_range, indices_q]
+        routed_tokens_kv = x[batch_range, indices_kv]
+
+        # calculate key padding mask
+
+        routed_tokens_kv_mask = None
+        if exists(mask):
+            routed_tokens_kv_mask = mask[batch_range, indices_kv]
 
         # do the heavier branch with only routed tokens
 
         routed_tokens_out = self.heavy_attn(
             routed_tokens_q,
+            mask = routed_tokens_kv_mask,
             context = routed_tokens_kv,
             normalized_scores_kv = normalized_scores_kv
         )
@@ -321,5 +345,5 @@ class ConditionalRoutedTransformerBlock(nn.Module):
         num_heavy_ff_tokens = None
     ):
         x = self.conditional_attn(x, mask = mask, num_heavy_tokens_q = num_heavy_attn_tokens_q, num_heavy_tokens_kv = num_heavy_attn_tokens_kv) + x
-        x = self.conditional_ff(x, num_heavy_tokens = num_heavy_ff_tokens) + x
+        x = self.conditional_ff(x, mask = mask, num_heavy_tokens = num_heavy_ff_tokens) + x
         return x

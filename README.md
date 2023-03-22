@@ -29,6 +29,7 @@ from colt5_attention import (
 # mock input, say it is 8192 length
 
 tokens = torch.randn(2, 8192, 512)
+mask = torch.ones(2, 32768).bool()  # can handle variable lengthed sequences
 
 # feedforward
 
@@ -37,7 +38,7 @@ ff = ConditionalRoutedFeedForward(
     num_heavy_tokens = 1024   # heavy branch receives only 1024 routed tokens of 8192
 )
 
-ff_out = ff(tokens)  # (2, 8192, 512) - light and heavy branch summed
+ff_out = ff(tokens, mask = mask)  # (2, 8192, 512) - light and heavy branch summed
 
 # attention
 
@@ -46,7 +47,7 @@ attn = ConditionalRoutedAttention(
     num_heavy_tokens = 1024   # heavy branch receives only 1024 routed tokens of 8192
 )
 
-attn_out = attn(tokens) # (2, 8192, 512) - light and heavy branch summed
+attn_out = attn(tokens, mask = mask) # (2, 8192, 512) - light and heavy branch summed
 
 # both attention and feedforward with residual
 # the complete transformer block
@@ -58,7 +59,7 @@ block = ConditionalRoutedTransformerBlock(
     num_heavy_attn_tokens = 1024
 )
 
-block_out = block(tokens) # (2, 8192, 512)
+block_out = block(tokens, mask = mask) # (2, 8192, 512)
 ```
 
 
