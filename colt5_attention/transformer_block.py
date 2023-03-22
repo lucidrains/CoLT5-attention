@@ -1,9 +1,11 @@
+from functools import partial
+
 import torch
 import torch.nn.functional as F
 from torch import nn, einsum
 
 from local_attention import LocalMHA
-from einops import rearrange
+from einops import rearrange, repeat
 
 # helper functions
 
@@ -104,29 +106,28 @@ class DifferentiableTopKRouter(nn.Module):
     def __init__(
         self,
         dim,
-        straight_through = True
+        straight_through = True,
+        temperature = 1.
     ):
         super().__init__()
         self.routing_token = nn.Parameter(torch.randn(dim))
         self.straight_through = straight_through
+        self.temperature = temperature
 
     def forward(
         self,
         x,
         *,
         num_tokens,
-        mask = None,
-        temperature = 1.
+        mask = None
     ):
-        assert temperature > 0
-
         scores = einsum('b n d, d -> b n', x, self.routing_token)
 
-        scores = scores / temperature
+        scores = scores / self.temperature
 
         if exists(mask):
             mask_value = -torch.finfo(scores.dtype).max
-            scores = scores.masked_fill(~mask, mask_value / 2)
+            scores = scores.masked_fill(~mask, mask_value)
 
         scores, indices = scores.sort(dim = -1)
 
@@ -149,6 +150,66 @@ class DifferentiableTopKRouter(nn.Module):
 
         return selected_scores, selected_indices
 
+# sinkhorn type routing, with ties to optimal transport
+
+from colt5_attention.sinkhorn import gumbel_sinkhorn, scatter_mean
+
+class SinkhornRouter(nn.Module):
+    """ gumbel sinkhorn router """
+
+    def __init__(
+        self,
+        dim,
+        straight_through = True,
+        n_iters = 8,
+        temperature = 0.7
+    ):
+        super().__init__()
+        self.routing_token = nn.Parameter(torch.randn(dim))
+
+        self.straight_through = straight_through
+        self.gumbel_sinkhorn_fn = partial(gumbel_sinkhorn, temperature = temperature, n_iters = n_iters)
+
+    def forward(
+        self,
+        x,
+        *,
+        num_tokens,
+        mask = None
+    ):
+        n = x.shape[-2]
+
+        scores = einsum('b n d, d -> b n', x, self.routing_token)
+
+        scores = repeat(scores, '... j -> ... i j', i = num_tokens)
+
+        if exists(mask):
+            mask_value = -torch.finfo(scores.dtype).max
+            sinkhorn_mask = rearrange(mask, 'b j -> b 1 j')
+            scores = scores.masked_fill(~sinkhorn_mask, mask_value)
+
+        # sinkhorn
+
+        scores = self.gumbel_sinkhorn_fn(scores)
+
+        # mask again just in case
+
+        if exists(mask):
+            scores = scores.masked_fill(~sinkhorn_mask, mask_value)
+
+        selected_scores, selected_indices = scores.topk(1, dim = -1)
+        selected_scores, selected_indices = map(lambda t: rearrange(t, '... 1 -> ...'), (selected_scores, selected_indices))
+
+        if self.straight_through:
+            # this would make sure all normalized scores returned are 1., but still differentiable using straight-through trick
+            selected_scores = selected_scores + (1. - selected_scores).detach()
+
+            if exists(mask):
+                batch_range = create_batch_range(x)
+                selected_mask = mask[batch_range, selected_indices]
+                selected_scores = selected_scores.masked_fill(~selected_mask, 0.)
+
+        return selected_scores, selected_indices
 # main classes
 
 class ConditionalRoutedFeedForward(nn.Module):
@@ -159,14 +220,26 @@ class ConditionalRoutedFeedForward(nn.Module):
         num_heavy_tokens,
         light_ff_mult = 0.5,
         heavy_ff_mult = 4,
-        router_straight_through = True # would make sure all normalized scores are 1., still differentiable
+        router_straight_through = True, # would make sure all normalized scores are 1., still differentiable
+        router_type = 'cum_softmax',
+        router_kwargs: dict = {}
     ):
         super().__init__()
+        assert router_type in {'cum_softmax', 'sinkhorn'}
+
         self.num_heavy_tokens = num_heavy_tokens
 
-        self.router = DifferentiableTopKRouter(
+        self.router_type = router_type
+
+        if router_type == 'cum_softmax':
+            router_klass = DifferentiableTopKRouter
+        elif router_type == 'sinkhorn':
+            router_klass = SinkhornRouter
+
+        self.router = router_klass(
             dim = dim,
-            straight_through = router_straight_through
+            straight_through = router_straight_through,
+            **router_kwargs
         )
 
         self.light_ff = FeedForward(dim, light_ff_mult)
@@ -201,7 +274,11 @@ class ConditionalRoutedFeedForward(nn.Module):
         # scatter back the output of the heavy feedforward branch
 
         heavy_out = torch.zeros_like(x)
-        heavy_out[batch_range, indices] = routed_tokens_out
+
+        if self.router_type == 'cum_softmax':
+            heavy_out[batch_range, indices] = routed_tokens_out
+        else:
+            heavy_out = scatter_mean(heavy_out, routed_tokens_out, indices, dim = 1)
 
         # sum light and heavy branches
 
@@ -216,12 +293,23 @@ class ConditionalRoutedAttention(nn.Module):
         num_heavy_tokens_kv,
         light_dim_head = 64,
         light_heads = 8,
-        light_window_size = 128,       # each token would see ~ 64 tokens either way to left or right
+        light_window_size = 128,        # each token would see ~ 64 tokens either way to left or right
         heavy_dim_head = 64,
         heavy_heads = 8,
-        router_straight_through = True # would make sure all normalized scores are 1., still differentiable
+        router_straight_through = True, # would make sure all normalized scores are 1., still differentiable
+        router_type = 'cum_softmax',
+        router_kwargs: dict = {}
     ):
         super().__init__()
+        assert router_type in {'cum_softmax', 'sinkhorn'}
+
+        self.router_type = router_type
+
+        if router_type == 'cum_softmax':
+            router_klass = DifferentiableTopKRouter
+        elif router_type == 'sinkhorn':
+            router_klass = SinkhornRouter
+
         self.num_heavy_tokens_q = num_heavy_tokens_q
         self.num_heavy_tokens_kv = num_heavy_tokens_kv
 
@@ -239,14 +327,16 @@ class ConditionalRoutedAttention(nn.Module):
 
         # for now, just do qkv for starters, need to separate to q and kv
 
-        self.q_router = DifferentiableTopKRouter(
+        self.q_router = router_klass(
             dim = dim,
-            straight_through = router_straight_through
+            straight_through = router_straight_through,
+            **router_kwargs
         )
 
-        self.kv_router = DifferentiableTopKRouter(
+        self.kv_router = router_klass(
             dim = dim,
-            straight_through = router_straight_through
+            straight_through = router_straight_through,
+            **router_kwargs
         )
 
         self.heavy_attn = Attention(
@@ -305,7 +395,11 @@ class ConditionalRoutedAttention(nn.Module):
         # scatter back the output of the heavy feedforward branch
 
         heavy_out = torch.zeros_like(x)
-        heavy_out[batch_range, indices_q] = routed_tokens_out
+
+        if self.router_type == 'cum_softmax':
+            heavy_out[batch_range, indices_q] = routed_tokens_out
+        else:
+            heavy_out = scatter_mean(heavy_out, routed_tokens_out, indices_q, dim = 1)
 
         # sum light and heavy branches
 
@@ -328,13 +422,19 @@ class ConditionalRoutedTransformerBlock(nn.Module):
         heavy_heads = 8,
         light_ff_mult = 0.5,
         heavy_ff_mult = 4,
+        router_straight_through = True,
+        router_type = 'cum_softmax',
+        router_kwargs: dict = {}
     ):
         super().__init__()
         self.conditional_ff = ConditionalRoutedFeedForward(
             dim,
             num_heavy_tokens = num_heavy_ff_tokens,
             light_ff_mult = light_ff_mult,
-            heavy_ff_mult = heavy_ff_mult
+            heavy_ff_mult = heavy_ff_mult,
+            router_straight_through = router_straight_through,
+            router_type = router_type,
+            router_kwargs = router_kwargs
         )
 
         self.conditional_attn = ConditionalRoutedAttention(
@@ -346,6 +446,9 @@ class ConditionalRoutedTransformerBlock(nn.Module):
             heavy_heads = heavy_heads,
             num_heavy_tokens_q = num_heavy_attn_tokens_q,
             num_heavy_tokens_kv = num_heavy_attn_tokens_kv,
+            router_straight_through = router_straight_through,
+            router_type = router_type,
+            router_kwargs = router_kwargs
         )
 
     def forward(
