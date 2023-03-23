@@ -227,16 +227,14 @@ class CoordinateDescent(nn.Module):
         dim,
         straight_through = True,
         n_iters = 50,           # 50 iterations in the paper
-        k = 8,                  # k value in coordinate descent, in paper this value was 1, 2, 4, 6, or 8 - controls the sparsity
         fetch_k_ratio = 9 / 8,  # in the paper, they do a bit slightly higher k (times this ratio) for better learning
-        eps = 1e-1              # the epsilon for coordinate descent, values in the paper range from 1e-3 to 1e-2
+        eps = 1.                # the epsilon for coordinate descent. in CoLT5 paper they used 1. apparently
     ):
         super().__init__()
         assert fetch_k_ratio >= 1.
         self.eps = eps
 
         self.n_iters = n_iters
-        self.k = k
         self.fetch_k_ratio = fetch_k_ratio
 
         self.routing_token = nn.Parameter(torch.randn(dim))
@@ -250,7 +248,6 @@ class CoordinateDescent(nn.Module):
         mask = None
     ):
         n, device, eps = x.shape[-2], x.device, self.eps
-        num_tokens = min(num_tokens, n)
 
         # s stands for eventual normalized score
 
@@ -258,7 +255,7 @@ class CoordinateDescent(nn.Module):
 
         # k, which controls the sparsity of the outputted scores from iterative coordinate descent
 
-        effective_k = self.k * self.fetch_k_ratio
+        effective_k = min(num_tokens * self.fetch_k_ratio, n)
 
         k = torch.tensor([effective_k], device = device)
 
