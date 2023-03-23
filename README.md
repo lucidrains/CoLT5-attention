@@ -86,6 +86,7 @@ block_out = block(tokens, mask = mask) # (2, 32768, 512)
 
 - [x] add the coordinate descent method as another router
 - [ ] for variable sequence lengths, allow for setting k as a function of sequence lengths per sample in batch
+- [ ] figure out if it can be done autoregressively and try it out
 
 ## Citations
 
