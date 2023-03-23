@@ -84,7 +84,8 @@ block_out = block(tokens, mask = mask) # (2, 32768, 512)
 
 ## Todo
 
-- [ ] add the coordinate descent method as another router
+- [x] add the coordinate descent method as another router
+- [ ] for variable sequence lengths, allow for setting k as a function of sequence lengths per sample in batch
 
 ## Citations
 
