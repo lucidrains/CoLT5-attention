@@ -215,7 +215,7 @@ class SinkhornRouter(nn.Module):
 
 from colt5_attention.coor_descent import coor_descent
 
-class CoordinateDescent(nn.Module):
+class CoordinateDescentRouter(nn.Module):
     """
     from Wright et al. https://arxiv.org/abs/1502.04759
     then adopted by https://arxiv.org/abs/2211.01267 for multi-vector document retrieval by Qian et al
@@ -283,7 +283,7 @@ class CoordinateDescent(nn.Module):
 ROUTERS = dict(
     cum_softmax = DifferentiableTopKRouter,
     sinkhorn = SinkhornRouter,
-    coor_descent = CoordinateDescent
+    coor_descent = CoordinateDescentRouter
 )
 
 # main classes
