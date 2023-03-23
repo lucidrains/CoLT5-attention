@@ -228,14 +228,12 @@ class CoordinateDescent(nn.Module):
         straight_through = True,
         n_iters = 50,           # 50 iterations in the paper
         k = 8,                  # k value in coordinate descent, in paper this value was 1, 2, 4, 6, or 8 - controls the sparsity
-        fetch_k_ratio = 9 / 9,  # in the paper, they do a bit slightly higher k (times this ratio) for better learning
-        eps = 1e-1,             # the epsilon for coordinate descent, values in the paper range from 1e-3 to 1e-2
-        use_softplus = False
+        fetch_k_ratio = 9 / 8,  # in the paper, they do a bit slightly higher k (times this ratio) for better learning
+        eps = 1e-1              # the epsilon for coordinate descent, values in the paper range from 1e-3 to 1e-2
     ):
         super().__init__()
         assert fetch_k_ratio >= 1.
         self.eps = eps
-        self.use_softplus = use_softplus
 
         self.n_iters = n_iters
         self.k = k
@@ -260,13 +258,13 @@ class CoordinateDescent(nn.Module):
 
         # k, which controls the sparsity of the outputted scores from iterative coordinate descent
 
-        k = torch.tensor([self.k], device = device)
+        effective_k = self.k * self.fetch_k_ratio
+
+        k = torch.tensor([effective_k], device = device)
 
         # coordinate descent
 
-        clamp_fn = F.relu if not self.use_softplus else F.softplus
-
-        scores = coor_descent(s, n_iters = self.n_iters, clamp_fn = clamp_fn, mask = mask, k = k, eps = eps)
+        scores = coor_descent(s, n_iters = self.n_iters, mask = mask, k = k, eps = eps)
 
         # get the topk scores and indices from the sparse matrix
 
