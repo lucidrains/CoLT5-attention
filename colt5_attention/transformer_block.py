@@ -227,11 +227,13 @@ class CoordinateDescent(nn.Module):
         n_iters = 50,           # 50 iterations in the paper
         k = 8,                  # k value in coordinate descent, in paper this value was 1, 2, 4, 6, or 8 - controls the sparsity
         fetch_k_ratio = 9 / 9,  # in the paper, they do a bit slightly higher k (times this ratio) for better learning
-        eps = 1e-1              # the epsilon for coordinate descent, values in the paper range from 1e-3 to 1e-2
+        eps = 1e-1,             # the epsilon for coordinate descent, values in the paper range from 1e-3 to 1e-2
+        use_softplus = False
     ):
         super().__init__()
         assert fetch_k_ratio >= 1.
         self.eps = eps
+        self.use_softplus = use_softplus
 
         self.n_iters = n_iters
         self.k = k
@@ -261,14 +263,17 @@ class CoordinateDescent(nn.Module):
         # coordinate descent
 
         constant = eps * log(k)
-        b = -s.relu()
+
+        clamp_fn = F.relu if not self.use_softplus else F.softplus
+
+        b = -clamp_fn(s)
 
         for _ in range(self.n_iters):
             if exists(mask):
                 s = s.masked_fill(~mask, mask_value)
 
             a = constant - eps * ((s + b) / eps).logsumexp(dim = -1, keepdim = True)
-            b = -(s + a).relu()
+            b = -clamp_fn(s + a)
 
         # calculate final score
 
