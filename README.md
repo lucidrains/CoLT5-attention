@@ -6,7 +6,7 @@ Implementation of the conditionally routed efficient attention in the proposed <
 
 Besides their use of coordinate descent from <a href="https://arxiv.org/abs/2211.01267">this paper</a> (main algorithm originally from <a href="https://arxiv.org/abs/1502.04759">Wright et al</a>), will also add two other approaches, one based on cumulative softmax, the other gumbel sinkhorn (optimal transport).
 
-Update: unsure of how the routing normalized scores for the key-values are used. Did some improvising there, multiplying it into the projected values, but if you think you know the answer, please open an issue
+Update: unsure of how the routing normalized scores for the key-values are used. Did some improvising there, <a href="https://github.com/lucidrains/CoLT5-attention/blob/main/colt5_attention/transformer_block.py#L86">scaling the projected values</a>, but if you think you know the answer, please open an issue
 
 ## Appreciation
 
