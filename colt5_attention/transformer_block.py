@@ -152,10 +152,11 @@ class DifferentiableTopKRouter(nn.Module):
 
 # sinkhorn type routing, with ties to optimal transport
 
-from colt5_attention.sinkhorn import gumbel_sinkhorn, scatter_mean
+from colt5_attention.sinkhorn import gumbel_sinkhorn, scatter_mean, log
 
 class SinkhornRouter(nn.Module):
     """ gumbel sinkhorn router """
+    """ ex. https://arxiv.org/abs/1910.09036 """
 
     def __init__(
         self,
@@ -178,6 +179,7 @@ class SinkhornRouter(nn.Module):
         mask = None
     ):
         n = x.shape[-2]
+        num_tokens = min(n, num_tokens)
 
         scores = einsum('b n d, d -> b n', x, self.routing_token)
 
@@ -210,6 +212,95 @@ class SinkhornRouter(nn.Module):
                 selected_scores = selected_scores.masked_fill(~selected_mask, 0.)
 
         return selected_scores, selected_indices
+
+class CoordinateDescent(nn.Module):
+    """
+    from Wright et al. https://arxiv.org/abs/1502.04759
+    then adopted by https://arxiv.org/abs/2211.01267 for multi-vector document retrieval by Qian et al
+    finally, used successfully by this paper for routing to heavy branch attention / feedforward
+    """
+
+    def __init__(
+        self,
+        dim,
+        straight_through = True,
+        n_iters = 50,           # 50 iterations in the paper
+        k = 8,                  # k value in coordinate descent, in paper this value was 1, 2, 4, 6, or 8 - controls the sparsity
+        fetch_k_ratio = 9 / 9,  # in the paper, they do a bit slightly higher k (times this ratio) for better learning
+        eps = 1e-1              # the epsilon for coordinate descent, values in the paper range from 1e-3 to 1e-2
+    ):
+        super().__init__()
+        assert fetch_k_ratio >= 1.
+        self.eps = eps
+
+        self.n_iters = n_iters
+        self.k = k
+        self.fetch_k_ratio = fetch_k_ratio
+
+        self.routing_token = nn.Parameter(torch.randn(dim))
+        self.straight_through = straight_through
+
+    def forward(
+        self,
+        x,
+        *,
+        num_tokens,
+        mask = None
+    ):
+        n, device, mask_value, eps = x.shape[-2], x.device, -torch.finfo(x.dtype).max, self.eps
+        num_tokens = min(num_tokens, n)
+
+        # s stands for eventual normalized score
+
+        s = einsum('b n d, d -> b n', x, self.routing_token)
+
+        # k, which controls the sparsity of the outputted scores from iterative coordinate descent
+
+        k = torch.tensor([self.k], device = device)
+
+        # coordinate descent
+
+        constant = eps * log(k)
+        b = -s.relu()
+
+        for _ in range(self.n_iters):
+            if exists(mask):
+                s = s.masked_fill(~mask, mask_value)
+
+            a = constant - eps * ((s + b) / eps).logsumexp(dim = -1, keepdim = True)
+            b = -(s + a).relu()
+
+        # calculate final score
+
+        if exists(mask):
+            # mask again just in case
+            s = s.masked_fill(~mask, mask_value)
+
+        scores = ((s + a + b) / eps).exp()
+
+        # get the topk scores and indices from the sparse matrix
+
+        selected_scores, selected_indices = scores.topk(num_tokens, dim = -1)
+
+        if self.straight_through:
+            # this would make sure all normalized scores returned are 1., but still differentiable using straight-through trick
+            selected_scores = selected_scores + (1. - selected_scores).detach()
+
+            if exists(mask):
+                batch_range = create_batch_range(x)
+                selected_mask = mask[batch_range, selected_indices]
+                selected_scores = selected_scores.masked_fill(~selected_mask, 0.)
+
+        return selected_scores, selected_indices
+
+# all router types
+
+ROUTERS = dict(
+    cum_softmax = DifferentiableTopKRouter,
+    sinkhorn = SinkhornRouter,
+    coor_descent = CoordinateDescent
+)
+
 # main classes
 
 class ConditionalRoutedFeedForward(nn.Module):
@@ -221,20 +312,17 @@ class ConditionalRoutedFeedForward(nn.Module):
         light_ff_mult = 0.5,
         heavy_ff_mult = 4,
         router_straight_through = True, # would make sure all normalized scores are 1., still differentiable
-        router_type = 'cum_softmax',
+        router_type = 'coor_descent',
         router_kwargs: dict = {}
     ):
         super().__init__()
-        assert router_type in {'cum_softmax', 'sinkhorn'}
+        assert router_type in ROUTERS.keys()
 
         self.num_heavy_tokens = num_heavy_tokens
 
         self.router_type = router_type
 
-        if router_type == 'cum_softmax':
-            router_klass = DifferentiableTopKRouter
-        elif router_type == 'sinkhorn':
-            router_klass = SinkhornRouter
+        router_klass = ROUTERS.get(router_type)
 
         self.router = router_klass(
             dim = dim,
@@ -275,10 +363,10 @@ class ConditionalRoutedFeedForward(nn.Module):
 
         heavy_out = torch.zeros_like(x)
 
-        if self.router_type == 'cum_softmax':
-            heavy_out[batch_range, indices] = routed_tokens_out
-        else:
+        if self.router_type == 'sinkhorn':
             heavy_out = scatter_mean(heavy_out, routed_tokens_out, indices, dim = 1)
+        else:
+            heavy_out[batch_range, indices] = routed_tokens_out
 
         # sum light and heavy branches
 
@@ -297,18 +385,15 @@ class ConditionalRoutedAttention(nn.Module):
         heavy_dim_head = 64,
         heavy_heads = 8,
         router_straight_through = True, # would make sure all normalized scores are 1., still differentiable
-        router_type = 'cum_softmax',
+        router_type = 'coor_descent',
         router_kwargs: dict = {}
     ):
         super().__init__()
-        assert router_type in {'cum_softmax', 'sinkhorn'}
+        assert router_type in ROUTERS.keys()
 
         self.router_type = router_type
 
-        if router_type == 'cum_softmax':
-            router_klass = DifferentiableTopKRouter
-        elif router_type == 'sinkhorn':
-            router_klass = SinkhornRouter
+        router_klass = ROUTERS.get(router_type)
 
         self.num_heavy_tokens_q = num_heavy_tokens_q
         self.num_heavy_tokens_kv = num_heavy_tokens_kv
@@ -396,10 +481,10 @@ class ConditionalRoutedAttention(nn.Module):
 
         heavy_out = torch.zeros_like(x)
 
-        if self.router_type == 'cum_softmax':
-            heavy_out[batch_range, indices_q] = routed_tokens_out
-        else:
+        if self.router_type == 'sinkhorn':
             heavy_out = scatter_mean(heavy_out, routed_tokens_out, indices_q, dim = 1)
+        else:
+            heavy_out[batch_range, indices_q] = routed_tokens_out
 
         # sum light and heavy branches
 
@@ -423,7 +508,7 @@ class ConditionalRoutedTransformerBlock(nn.Module):
         light_ff_mult = 0.5,
         heavy_ff_mult = 4,
         router_straight_through = True,
-        router_type = 'cum_softmax',
+        router_type = 'coor_descent',
         router_kwargs: dict = {}
     ):
         super().__init__()

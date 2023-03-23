@@ -14,7 +14,7 @@ def sample_gumbel(shape, device, dtype):
     u = torch.empty(shape, device = device, dtype = dtype).uniform_(0, 1)
     return -log(-log(u))
 
-def sinkhorn_sorting_operator(r, n_iters = 8):
+def sinkhorn(r, n_iters = 8):
     n = r.shape[1]
     for _ in range(n_iters):
         r = r - torch.logsumexp(r, dim = 2, keepdim = True)
@@ -25,4 +25,4 @@ def gumbel_sinkhorn(r, n_iters = 8, temperature = 0.7):
     r = log(r)
     gumbel = sample_gumbel(r.shape, r.device, r.dtype)
     r = (r + gumbel) / temperature
-    return sinkhorn_sorting_operator(r, n_iters)
+    return sinkhorn(r, n_iters)

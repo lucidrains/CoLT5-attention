@@ -1,6 +1,6 @@
 <img src="./colt5.png" width="400px"></img>
 
-## CoLT5 Attention - Pytorch (wip)
+## CoLT5 Attention - Pytorch
 
 Implementation of the conditionally routed efficient attention in the proposed <a href="https://arxiv.org/abs/2303.09752">CoLT5</a> architecture, in Pytorch.
 
@@ -75,7 +75,8 @@ block = ConditionalRoutedTransformerBlock(
     heavy_ff_mult = 4,
     num_heavy_ff_tokens = 1024,
     num_heavy_attn_tokens_q = 1024,
-    num_heavy_attn_tokens_kv = 1024
+    num_heavy_attn_tokens_kv = 1024,
+    router_type = 'coor_descent'  # you have your choice of coordinate descent, as in paper - or 'sinkhorn' or 'cum_softmax'
 )
 
 block_out = block(tokens, mask = mask) # (2, 32768, 512)
