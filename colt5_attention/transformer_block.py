@@ -213,6 +213,8 @@ class SinkhornRouter(nn.Module):
 
         return selected_scores, selected_indices
 
+from colt5_attention.coor_descent import coor_descent
+
 class CoordinateDescent(nn.Module):
     """
     from Wright et al. https://arxiv.org/abs/1502.04759
@@ -249,7 +251,7 @@ class CoordinateDescent(nn.Module):
         num_tokens,
         mask = None
     ):
-        n, device, mask_value, eps = x.shape[-2], x.device, -torch.finfo(x.dtype).max, self.eps
+        n, device, eps = x.shape[-2], x.device, self.eps
         num_tokens = min(num_tokens, n)
 
         # s stands for eventual normalized score
@@ -262,26 +264,9 @@ class CoordinateDescent(nn.Module):
 
         # coordinate descent
 
-        constant = eps * log(k)
-
         clamp_fn = F.relu if not self.use_softplus else F.softplus
 
-        b = -clamp_fn(s)
-
-        for _ in range(self.n_iters):
-            if exists(mask):
-                s = s.masked_fill(~mask, mask_value)
-
-            a = constant - eps * ((s + b) / eps).logsumexp(dim = -1, keepdim = True)
-            b = -clamp_fn(s + a)
-
-        # calculate final score
-
-        if exists(mask):
-            # mask again just in case
-            s = s.masked_fill(~mask, mask_value)
-
-        scores = ((s + a + b) / eps).exp()
+        scores = coor_descent(s, n_iters = self.n_iters, clamp_fn = clamp_fn, mask = mask, k = k, eps = eps)
 
         # get the topk scores and indices from the sparse matrix
 
