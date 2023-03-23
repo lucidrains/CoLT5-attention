@@ -1,6 +1,6 @@
 <img src="./colt5.png" width="400px"></img>
 
-## CoLT5 Attention - Pytorch (wip)
+## CoLT5 Attention - Pytorch
 
 Implementation of the conditionally routed efficient attention in the proposed <a href="https://arxiv.org/abs/2303.09752">CoLT5</a> architecture, in Pytorch.
 
