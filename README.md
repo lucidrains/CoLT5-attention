@@ -82,6 +82,40 @@ block = ConditionalRoutedTransformerBlock(
 block_out = block(tokens, mask = mask) # (2, 32768, 512)
 ```
 
+Also included a variation of the conditionally routed attention for cross attention, to be tried with long context memories in a transformer-xl
+
+```python
+import torch
+from colt5_attention import ConditionalRoutedCrossAttention
+
+# mock input, let us say it is a transformer of 1024 length attending to 1 million context past memories
+
+tokens = torch.randn(2, 1024, 512).cuda()
+tokens_mask = torch.ones(2, 1024).bool().cuda()
+
+memories = torch.randn(2, int(1e6), 512).cuda()
+memories_mask = torch.ones(2, int(1e6)).bool().cuda()
+
+# conditionally routed cross attention
+
+cross_attn = ConditionalRoutedCrossAttention(
+    dim = 512,
+    dim_head = 64,
+    heads = 8,
+    num_tokens_q = 512,   # only 512 routed from 1024
+    num_tokens_kv = 1024, # only 1024 routed from 1 million
+).cuda()
+
+cross_attn_out = cross_attn(
+    tokens,
+    context = memories,
+    mask = tokens_mask,
+    context_mask = memories_mask
+)
+
+cross_attn_out.shape # (2, 1024, 512) - same as tokens
+```
+
 ## Todo
 
 - [x] add the coordinate descent method as another router

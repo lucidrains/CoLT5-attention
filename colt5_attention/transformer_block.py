@@ -395,8 +395,6 @@ class ConditionalRoutedAttention(nn.Module):
             look_forward = 1
         )
 
-        # for now, just do qkv for starters, need to separate to q and kv
-
         self.q_router = router_klass(
             dim = dim,
             straight_through = router_straight_through,
@@ -431,7 +429,7 @@ class ConditionalRoutedAttention(nn.Module):
         batch_range = torch.arange(batch, device = device)
         batch_range = rearrange(batch_range, 'b -> b 1')
 
-        # light local attention sees all tokens
+        # light local attention sees all tokens in a limited context
 
         light_out = self.light_attn(x, mask = mask)
 
@@ -440,7 +438,7 @@ class ConditionalRoutedAttention(nn.Module):
         normalized_scores_q, indices_q = self.q_router(x, num_tokens = num_heavy_tokens_q, mask = mask)
         normalized_scores_kv, indices_kv = self.kv_router(x, num_tokens = num_heavy_tokens_kv, mask = mask)
 
-        # select the tokens to be routed to heavier feedforward (hidden dimension is 4 times model dimensions)
+        # select the tokens to be routed to full attention
 
         routed_tokens_q = x[batch_range, indices_q]
         routed_tokens_kv = x[batch_range, indices_kv]
@@ -462,7 +460,7 @@ class ConditionalRoutedAttention(nn.Module):
 
         routed_tokens_out = routed_tokens_out * rearrange(normalized_scores_q, '... -> ... 1')
 
-        # scatter back the output of the heavy feedforward branch
+        # scatter back the output of the heavy branch
 
         heavy_out = torch.zeros_like(x)
 
@@ -474,6 +472,105 @@ class ConditionalRoutedAttention(nn.Module):
         # sum light and heavy branches
 
         return light_out + heavy_out
+
+# adapting the conditional routed self attention to cross attention
+
+class ConditionalRoutedCrossAttention(nn.Module):
+    def __init__(
+        self,
+        dim,
+        *,
+        num_tokens_q,
+        num_tokens_kv,
+        dim_head = 64,
+        heads = 8,
+        router_straight_through = True, # would make sure all normalized scores are 1., still differentiable
+        router_type = 'coor_descent',
+        router_kwargs: dict = {}
+    ):
+        super().__init__()
+        assert router_type in ROUTERS.keys()
+
+        self.router_type = router_type
+
+        router_klass = ROUTERS.get(router_type)
+
+        self.num_tokens_q = num_tokens_q
+        self.num_tokens_kv = num_tokens_kv
+
+        self.q_router = router_klass(
+            dim = dim,
+            straight_through = router_straight_through,
+            **router_kwargs
+        )
+
+        self.kv_router = router_klass(
+            dim = dim,
+            straight_through = router_straight_through,
+            **router_kwargs
+        )
+
+        self.heavy_attn = Attention(
+            dim = dim,
+            dim_head = dim_head,
+            heads = heads
+        )
+
+    def forward(
+        self,
+        x,
+        context,
+        *,
+        num_tokens_q = None,
+        num_tokens_kv = None,
+        mask = None,
+        context_mask = None
+    ):
+        batch, device = x.shape[0], x.device
+
+        num_tokens_q = default(num_tokens_q, self.num_tokens_q)
+        num_tokens_kv = default(num_tokens_kv, self.num_tokens_kv)
+
+        batch_range = torch.arange(batch, device = device)
+        batch_range = rearrange(batch_range, 'b -> b 1')
+
+        # route tokens appropriately
+
+        normalized_scores_q, indices_q = self.q_router(x, num_tokens = num_tokens_q, mask = mask)
+        normalized_scores_kv, indices_kv = self.kv_router(context, num_tokens = num_tokens_kv, mask = context_mask)
+
+        # select the tokens to be routed
+
+        routed_tokens_q = x[batch_range, indices_q]
+        routed_tokens_kv = x[batch_range, indices_kv]
+
+        # calculate key padding mask
+
+        routed_tokens_kv_mask = None
+        if exists(mask):
+            routed_tokens_kv_mask = context_mask[batch_range, indices_kv]
+
+        # do the heavier branch with only routed tokens
+
+        routed_tokens_out = self.heavy_attn(
+            routed_tokens_q,
+            mask = routed_tokens_kv_mask,
+            context = routed_tokens_kv,
+            normalized_scores_kv = normalized_scores_kv
+        )
+
+        routed_tokens_out = routed_tokens_out * rearrange(normalized_scores_q, '... -> ... 1')
+
+        # scatter back the output
+
+        out = torch.zeros_like(x)
+
+        if self.router_type == 'sinkhorn':
+            out = scatter_mean(heavy_out, routed_tokens_out, indices_q, dim = 1)
+        else:
+            out[batch_range, indices_q] = routed_tokens_out
+
+        return out
 
 # block
 
