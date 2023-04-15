@@ -528,27 +528,41 @@ class ConditionalRoutedCrossAttention(nn.Module):
     ):
         batch, device = x.shape[0], x.device
 
-        num_tokens_q = default(num_tokens_q, self.num_tokens_q)
-        num_tokens_kv = default(num_tokens_kv, self.num_tokens_kv)
-
         batch_range = torch.arange(batch, device = device)
         batch_range = rearrange(batch_range, 'b -> b 1')
 
-        # route tokens appropriately
+        # route the queries
 
-        normalized_scores_q, indices_q = self.q_router(x, num_tokens = num_tokens_q, mask = mask)
-        normalized_scores_kv, indices_kv = self.kv_router(context, num_tokens = num_tokens_kv, mask = context_mask)
+        query_length = x.shape[-2]
+        num_tokens_q = default(num_tokens_q, self.num_tokens_q)
 
-        # select the tokens to be routed
+        routed_tokens_q = x
+        should_route_queries = query_length > num_tokens_q
 
-        routed_tokens_q = x[batch_range, indices_q]
-        routed_tokens_kv = x[batch_range, indices_kv]
+        if should_route_queries:
+            normalized_scores_q, indices_q = self.q_router(x, num_tokens = num_tokens_q, mask = mask)
 
-        # calculate key padding mask
+            routed_tokens_q = x[batch_range, indices_q]
 
-        routed_tokens_kv_mask = None
-        if exists(mask):
-            routed_tokens_kv_mask = context_mask[batch_range, indices_kv]
+        # route the long contexts
+
+        key_value_length = context.shape[-2]
+        num_tokens_kv = default(num_tokens_kv, self.num_tokens_kv)
+
+        routed_tokens_kv = context
+        routed_tokens_kv_mask = context_mask
+        normalized_scores_kv = None
+
+        should_route_kv = key_value_length > num_tokens_kv
+
+        if should_route_kv:
+            normalized_scores_kv, indices_kv = self.kv_router(context, num_tokens = num_tokens_kv, mask = context_mask)
+
+            routed_tokens_kv = x[batch_range, indices_kv]
+
+            routed_tokens_kv_mask = None
+            if exists(context_mask):
+                routed_tokens_kv_mask = context_mask[batch_range, indices_kv]
 
         # do the heavier branch with only routed tokens
 
@@ -559,9 +573,15 @@ class ConditionalRoutedCrossAttention(nn.Module):
             normalized_scores_kv = normalized_scores_kv
         )
 
-        routed_tokens_out = routed_tokens_out * rearrange(normalized_scores_q, '... -> ... 1')
+        if should_route_queries:
+            routed_tokens_out = routed_tokens_out * rearrange(normalized_scores_q, '... -> ... 1')
 
-        # scatter back the output
+        # early return if queries did not undergo routing
+
+        if not should_route_queries:
+            return routed_tokens_out
+
+        # otherwise, scatter back the query outputs
 
         out = torch.zeros_like(x)
 
