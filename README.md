@@ -124,6 +124,7 @@ cross_attn_out.shape # (2, 1024, 512) - same as tokens
 - [ ] for variable sequence lengths, allow for setting k as a function of sequence lengths per sample in batch
 - [ ] create a variant of CoLT5 for high resolution feature maps (image attention) - then try out for diffusion
 - [ ] in the cross attention scenario, support for routing token that first queries the source tokens, before retrieving from memories
+- [ ] make flash attention compatible
 
 ## Citations
 
