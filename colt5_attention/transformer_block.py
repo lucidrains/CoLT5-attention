@@ -486,6 +486,7 @@ class ConditionalRoutedAttention(nn.Module):
         *,
         num_heavy_tokens_q,
         num_heavy_tokens_kv,
+        num_routed_kv = 1,
         light_dim_head = 64,
         light_heads = 8,
         light_window_size = 128,        # each token would see ~ 64 tokens either way to left or right
@@ -525,6 +526,7 @@ class ConditionalRoutedAttention(nn.Module):
 
         self.kv_router = router_klass(
             dim = dim,
+            num_routing_tokens = num_routed_kv,
             straight_through = router_straight_through,
             **router_kwargs
         )
@@ -726,6 +728,7 @@ class ConditionalRoutedTransformerBlock(nn.Module):
         *,
         num_heavy_attn_tokens_q,
         num_heavy_attn_tokens_kv,
+        num_routed_kv = 1,
         num_heavy_ff_tokens,
         light_dim_head = 64,
         light_heads = 8,
@@ -758,6 +761,7 @@ class ConditionalRoutedTransformerBlock(nn.Module):
             heavy_heads = heavy_heads,
             num_heavy_tokens_q = num_heavy_attn_tokens_q,
             num_heavy_tokens_kv = num_heavy_attn_tokens_kv,
+            num_routed_kv = num_routed_kv,
             router_straight_through = router_straight_through,
             router_type = router_type,
             router_kwargs = router_kwargs
