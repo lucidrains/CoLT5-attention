@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torch import nn, einsum
 
 from local_attention import LocalMHA
-from einops import rearrange, repeat
+from einops import rearrange, repeat, pack, unpack
 
 # helper functions
 
@@ -14,6 +14,15 @@ def exists(val):
 
 def default(val, d):
     return val if exists(val) else d
+
+def divisible_by(numer, denom):
+    return (numer % denom) == 0
+
+def pack_one(t, pattern):
+    return pack([t], pattern)
+
+def unpack_one(t, ps, pattern):
+    return unpack(t, ps, pattern)[0]
 
 # tensor helpers
 
@@ -78,23 +87,65 @@ class Attention(nn.Module):
 
         context = default(context, x)
 
-        q, k, v = (self.to_q(x), *self.to_kv(context).chunk(2, dim = -1))
-        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = self.heads), (q, k, v))
+        # if routing dimension is not there, unsqueeze for 1 routing dimension
+
+        if context.ndim == 3:
+            context = rearrange(context, 'b n d -> b 1 n d')
+
+        if exists(normalized_scores_kv):
+            if normalized_scores_kv.ndim == 2:
+                normalized_scores_kv = rearrange(normalized_scores_kv, 'b n -> b 1 n')
+
+            normalized_scores_kv = rearrange(normalized_scores_kv, 'b r n -> b r 1 n 1')
+
+        num_kv_routes = context.shape[1]
+
+        # get queries
+
+        q = self.to_q(x)
+        q = rearrange(q, 'b n (h d) -> b h n d', h = h)
+
+        # handle key / values, with the routing dimension, dividing the number of heads in between the routes
+
+        assert divisible_by(h, num_kv_routes), 'number of heads must be divisible by the number of key / value routes'
+        heads_per_route = h // num_kv_routes
+
+        kv_weight = rearrange(self.to_kv.weight, '(r h d) i -> r h d i', h = heads_per_route, r = num_kv_routes)
+
+        kv = einsum('r h d i, b r n i -> b r h n d', kv_weight, context)
+        k, v = kv.chunk(2, dim = -1)
 
         if exists(normalized_scores_kv):
             # in paper, not sure how they passed back the signal from heavy attention to normalized scores for key/values. just multiply the values by the normalized kv scores for now
-            v = v * rearrange(normalized_scores_kv, 'b n -> b 1 n 1')
+            v = v * normalized_scores_kv
+
+        k, v = map(lambda t: rearrange(t, 'b r h n d -> b (r h) n d'), (k, v))
+
+        # scale and get similarity
 
         q = q * self.scale
         sim = einsum('b h i d, b h j d -> b h i j', q, k)
 
+        # masking
+
         if exists(mask):
-            mask = rearrange(mask, 'b j -> b 1 1 j')
+            if mask.ndim == 3:
+                mask = repeat(mask, 'b r j -> b (r h) 1 j', h = heads_per_route)
+            else:
+                mask = rearrange(mask, 'b j -> b 1 1 j')
+
             sim = sim.masked_fill(~mask, -torch.finfo(sim.dtype).max)
+
+        # attention
 
         attn = sim.softmax(dim = -1)
 
+        # aggregate
+
         out = einsum('b h i j, b h j d -> b h i d', attn, v)
+
+        # merge heads
+
         out = rearrange(out, 'b h n d -> b n (h d)')
         return self.to_out(out)
 
@@ -107,10 +158,14 @@ class DifferentiableTopKRouter(nn.Module):
         self,
         dim,
         straight_through = True,
-        temperature = 1.
+        temperature = 1.,
+        num_routing_tokens = 1
     ):
         super().__init__()
-        self.routing_token = nn.Parameter(torch.randn(dim))
+        self.is_one_routing_token = num_routing_tokens == 1
+        self.num_routing_tokens = num_routing_tokens
+        self.routing_token = nn.Parameter(torch.randn(num_routing_tokens, dim))
+
         self.straight_through = straight_through
         self.temperature = temperature
 
@@ -121,7 +176,19 @@ class DifferentiableTopKRouter(nn.Module):
         num_tokens,
         mask = None
     ):
-        scores = einsum('b n d, d -> b n', x, self.routing_token)
+        num_routes = self.num_routing_tokens
+
+        # eventual normalized score
+
+        scores = einsum('b n d, r d -> b r n', x, self.routing_token)
+
+        # merge routing dimension into batch
+
+        x = repeat(x, 'b ... -> (b r) ...', r = num_routes)
+        scores, ps = pack_one(scores, '* n')
+
+        if exists(mask):
+            mask = repeat(mask, 'b ... -> (b r) ...', r = num_routes)
 
         scores = scores / self.temperature
 
@@ -148,6 +215,12 @@ class DifferentiableTopKRouter(nn.Module):
                 selected_mask = mask[batch_range, selected_indices]
                 selected_scores = selected_scores.masked_fill(~selected_mask, 0.)
 
+        # split out routing dimension again if need be
+
+        if not self.is_one_routing_token:
+            selected_scores = unpack_one(selected_scores, ps, '* n')
+            selected_indices = unpack_one(selected_indices, ps, '* n')
+
         return selected_scores, selected_indices
 
 # sinkhorn type routing, with ties to optimal transport
@@ -163,10 +236,13 @@ class SinkhornRouter(nn.Module):
         dim,
         straight_through = True,
         n_iters = 8,
-        temperature = 0.7
+        temperature = 0.7,
+        num_routing_tokens = 1
     ):
         super().__init__()
-        self.routing_token = nn.Parameter(torch.randn(dim))
+        self.is_one_routing_token = num_routing_tokens == 1
+        self.num_routing_tokens = num_routing_tokens
+        self.routing_token = nn.Parameter(torch.randn(num_routing_tokens, dim))
 
         self.straight_through = straight_through
         self.gumbel_sinkhorn_fn = partial(gumbel_sinkhorn, temperature = temperature, n_iters = n_iters)
@@ -178,10 +254,22 @@ class SinkhornRouter(nn.Module):
         num_tokens,
         mask = None
     ):
-        n = x.shape[-2]
+        n, num_routes = x.shape[-2], self.num_routing_tokens
         num_tokens = min(n, num_tokens)
 
-        scores = einsum('b n d, d -> b n', x, self.routing_token)
+        # eventual normalized score
+
+        scores = einsum('b n d, r d -> b r n', x, self.routing_token)
+
+        # merge routing dimension into batch
+
+        x = repeat(x, 'b ... -> (b r) ...', r = num_routes)
+        scores, ps = pack_one(scores, '* n')
+
+        if exists(mask):
+            mask = repeat(mask, 'b ... -> (b r) ...', r = num_routes)
+
+        # calculate scores
 
         scores = repeat(scores, '... j -> ... i j', i = num_tokens)
 
@@ -209,7 +297,14 @@ class SinkhornRouter(nn.Module):
             if exists(mask):
                 batch_range = create_batch_range(x)
                 selected_mask = mask[batch_range, selected_indices]
+
                 selected_scores = selected_scores.masked_fill(~selected_mask, 0.)
+
+        # split out routing dimension again if need be
+
+        if not self.is_one_routing_token:
+            selected_scores = unpack_one(selected_scores, ps, '* n')
+            selected_indices = unpack_one(selected_indices, ps, '* n')
 
         return selected_scores, selected_indices
 
@@ -228,7 +323,8 @@ class CoordinateDescentRouter(nn.Module):
         straight_through = True,
         n_iters = 50,           # 50 iterations in the paper
         fetch_k_ratio = 9 / 8,  # in the paper, they do a bit slightly higher k (times this ratio) for better learning
-        eps = 1.                # the epsilon for coordinate descent. in CoLT5 paper they used 1. apparently
+        eps = 1.,               # the epsilon for coordinate descent. in CoLT5 paper they used 1. apparently
+        num_routing_tokens = 1
     ):
         super().__init__()
         assert fetch_k_ratio >= 1.
@@ -237,7 +333,9 @@ class CoordinateDescentRouter(nn.Module):
         self.n_iters = n_iters
         self.fetch_k_ratio = fetch_k_ratio
 
-        self.routing_token = nn.Parameter(torch.randn(dim))
+        self.is_one_routing_token = num_routing_tokens == 1
+        self.num_routing_tokens = num_routing_tokens
+        self.routing_token = nn.Parameter(torch.randn(num_routing_tokens, dim))
         self.straight_through = straight_through
 
     def forward(
@@ -247,11 +345,19 @@ class CoordinateDescentRouter(nn.Module):
         num_tokens,
         mask = None
     ):
-        n, device, eps = x.shape[-2], x.device, self.eps
+        n, device, eps, num_routes = x.shape[-2], x.device, self.eps, self.num_routing_tokens
 
         # s stands for eventual normalized score
 
-        s = einsum('b n d, d -> b n', x, self.routing_token)
+        s = einsum('b n d, r d -> b r n', x, self.routing_token)
+
+        # merge routing dimension into batch
+
+        x = repeat(x, 'b ... -> (b r) ...', r = num_routes)
+        s, ps = pack_one(s, '* n')
+
+        if exists(mask):
+            mask = repeat(mask, 'b ... -> (b r) ...', r = num_routes)
 
         # k, which controls the sparsity of the outputted scores from iterative coordinate descent
 
@@ -275,6 +381,12 @@ class CoordinateDescentRouter(nn.Module):
                 batch_range = create_batch_range(x)
                 selected_mask = mask[batch_range, selected_indices]
                 selected_scores = selected_scores.masked_fill(~selected_mask, 0.)
+
+        # split out routing dimension again if need be
+
+        if not self.is_one_routing_token:
+            selected_scores = unpack_one(selected_scores, ps, '* n')
+            selected_indices = unpack_one(selected_indices, ps, '* n')
 
         return selected_scores, selected_indices
 
@@ -482,11 +594,13 @@ class ConditionalRoutedCrossAttention(nn.Module):
         *,
         num_tokens_q,
         num_tokens_kv,
+        num_sets_kv = 1,                # setting this greater than 1 would route multiple sets of key / values, each of size num_tokens_kv, using this many routing tokens
         dim_head = 64,
         heads = 8,
         router_straight_through = True, # would make sure all normalized scores are 1., still differentiable
         router_type = 'coor_descent',
-        router_kwargs: dict = {}
+        router_kwargs: dict = {},
+        kv_routing_tokens = 1
     ):
         super().__init__()
         assert router_type in ROUTERS.keys()
@@ -507,6 +621,7 @@ class ConditionalRoutedCrossAttention(nn.Module):
         self.kv_router = router_klass(
             dim = dim,
             straight_through = router_straight_through,
+            num_routing_tokens = kv_routing_tokens,
             **router_kwargs
         )
 

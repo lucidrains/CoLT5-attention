@@ -102,8 +102,9 @@ cross_attn = ConditionalRoutedCrossAttention(
     dim = 512,
     dim_head = 64,
     heads = 8,
-    num_tokens_q = 512,   # only 512 routed from 1024
-    num_tokens_kv = 1024, # only 1024 routed from 1 million
+    num_tokens_q = 512,         # only 512 routed from 1024
+    num_tokens_kv = 1024,       # only 1024 routed from 1 million
+    kv_routing_tokens = 2,      # say you want 2 routing tokens to route different sets of key / values to the queries. 4 attention heads will be allocated to each routed set in this example (8 / 2)
 ).cuda()
 
 cross_attn_out = cross_attn(
