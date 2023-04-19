@@ -78,6 +78,16 @@ class Attention(nn.Module):
         mask = None,
         normalized_scores_kv = None
     ):
+        """
+        einops:
+        b - batch
+        h - heads, or number of heads per route
+        r - routing dimension, for routing different sets of key / values - should be more expressive
+        n - sequence dimension
+        d - head dimension
+        i - input model dimension
+        """
+
         h = self.heads
 
         x = self.norm(x)
