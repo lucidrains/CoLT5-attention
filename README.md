@@ -12,6 +12,8 @@ Update: unsure of how the routing normalized scores for the key-values are used.
 
 - <a href="https://stability.ai/">Stability.ai</a> for the generous sponsorship to work on cutting edge artificial intelligence research
 
+- <a href="https://github.com/arogozhnikov/einops">einops</a> for making my life easy
+- 
 ## Install
 
 ```bash
