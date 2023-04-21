@@ -59,12 +59,15 @@ class Attention(nn.Module):
         self,
         dim,
         dim_head = 64,
-        heads = 8
+        heads = 8,
+        multiply_keys_by_score = False
     ):
         super().__init__()
         self.heads = heads
         self.scale = dim_head ** -0.5
         dim_hidden = dim_head * heads
+
+        self.multiply_keys_by_score = multiply_keys_by_score
 
         self.norm = RMSNorm(dim)
         self.to_q = nn.Linear(dim, dim_hidden, bias = False)
@@ -76,7 +79,8 @@ class Attention(nn.Module):
         x,
         context = None,
         mask = None,
-        normalized_scores_kv = None
+        normalized_scores_kv = None,
+        normalized_scores_q = None
     ):
         """
         einops:
@@ -115,6 +119,9 @@ class Attention(nn.Module):
         q = self.to_q(x)
         q = rearrange(q, 'b n (h d) -> b h n d', h = h)
 
+        if exists(normalized_scores_q):
+            q = q * rearrange(normalized_scores_q, 'b n -> b 1 n 1')
+
         # handle key / values, with the routing dimension, dividing the number of heads in between the routes
 
         assert divisible_by(h, num_kv_routes), 'number of heads must be divisible by the number of key / value routes'
@@ -128,6 +135,9 @@ class Attention(nn.Module):
         if exists(normalized_scores_kv):
             # in paper, not sure how they passed back the signal from heavy attention to normalized scores for key/values. just multiply the values by the normalized kv scores for now
             v = v * normalized_scores_kv
+
+            if self.multiply_keys_by_score:
+                k = k * normalized_scores_kv
 
         k, v = map(lambda t: rearrange(t, 'b r h n d -> b (r h) n d'), (k, v))
 
@@ -494,7 +504,9 @@ class ConditionalRoutedAttention(nn.Module):
         heavy_heads = 8,
         router_straight_through = True, # would make sure all normalized scores are 1., still differentiable
         router_type = 'coor_descent',
-        router_kwargs: dict = {}
+        router_kwargs: dict = {},
+        multiply_keys_by_score = False,
+        multiply_queries_by_score = False
     ):
         super().__init__()
         assert router_type in ROUTERS.keys()
@@ -505,6 +517,8 @@ class ConditionalRoutedAttention(nn.Module):
 
         self.num_heavy_tokens_q = num_heavy_tokens_q
         self.num_heavy_tokens_kv = num_heavy_tokens_kv
+
+        self.multiply_queries_by_score = multiply_queries_by_score
 
         self.light_attn = LocalMHA(
             dim = dim,
@@ -534,7 +548,8 @@ class ConditionalRoutedAttention(nn.Module):
         self.heavy_attn = Attention(
             dim = dim,
             dim_head = heavy_dim_head,
-            heads = heavy_heads
+            heads = heavy_heads,
+            multiply_keys_by_score = multiply_keys_by_score
         )
 
     def forward(
@@ -579,7 +594,8 @@ class ConditionalRoutedAttention(nn.Module):
             routed_tokens_q,
             mask = routed_tokens_kv_mask,
             context = routed_tokens_kv,
-            normalized_scores_kv = normalized_scores_kv
+            normalized_scores_kv = normalized_scores_kv,
+            normalized_scores_q = normalized_scores_q if self.multiply_queries_by_score else None
         )
 
         routed_tokens_out = routed_tokens_out * rearrange(normalized_scores_q, '... -> ... 1')
@@ -612,7 +628,8 @@ class ConditionalRoutedCrossAttention(nn.Module):
         router_straight_through = True, # would make sure all normalized scores are 1., still differentiable
         router_type = 'coor_descent',
         router_kwargs: dict = {},
-        kv_routing_tokens = 1
+        kv_routing_tokens = 1,
+        multiply_keys_by_score = False
     ):
         super().__init__()
         assert router_type in ROUTERS.keys()
@@ -640,7 +657,8 @@ class ConditionalRoutedCrossAttention(nn.Module):
         self.heavy_attn = Attention(
             dim = dim,
             dim_head = dim_head,
-            heads = heads
+            heads = heads,
+            multiply_keys_by_score = multiply_keys_by_score
         )
 
     def forward(
@@ -739,7 +757,9 @@ class ConditionalRoutedTransformerBlock(nn.Module):
         heavy_ff_mult = 4,
         router_straight_through = True,
         router_type = 'coor_descent',
-        router_kwargs: dict = {}
+        router_kwargs: dict = {},
+        multiply_keys_by_score = False,
+        multiply_queries_by_score = False
     ):
         super().__init__()
         self.conditional_ff = ConditionalRoutedFeedForward(
@@ -764,7 +784,9 @@ class ConditionalRoutedTransformerBlock(nn.Module):
             num_routed_kv = num_routed_kv,
             router_straight_through = router_straight_through,
             router_type = router_type,
-            router_kwargs = router_kwargs
+            router_kwargs = router_kwargs,
+            multiply_keys_by_score = multiply_keys_by_score,
+            multiply_queries_by_score = multiply_queries_by_score
         )
 
     def forward(
