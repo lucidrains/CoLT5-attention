@@ -129,6 +129,7 @@ cross_attn_out.shape # (2, 1024, 512) - same as tokens
 - [ ] create a variant of CoLT5 for high resolution feature maps (image attention) - then try out for diffusion
 - [ ] in the cross attention scenario, support for routing token that first queries the source tokens, before retrieving from memories
 - [ ] make flash attention compatible
+- [ ] work out a triton forward / backward version of coordinate descent (coor_descent), as it seems torch compile does not work well enough for coor_descent function just yet
 
 ## Citations
 
