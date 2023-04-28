@@ -38,10 +38,11 @@ def pad_to_multiple(tensor, multiple, dim=-1, value=0):
 
 # tensor helpers
 
-def create_batch_range(t):
+def create_batch_range(t, right_pad_dims = 1):
     b, device = t.shape[0], t.device
     batch_range = torch.arange(b, device = device)
-    return rearrange(batch_range, 'b -> b 1')
+    pad_dims = ((1,) * right_pad_dims)
+    return batch_range.reshape(-1, *pad_dims)
 
 # normalization
 
@@ -598,7 +599,6 @@ class ConditionalRoutedAttention(nn.Module):
         num_heavy_tokens_q = default(num_heavy_tokens_q, self.num_heavy_tokens_q)
         num_heavy_tokens_kv = default(num_heavy_tokens_kv, self.num_heavy_tokens_kv)
 
-        batch_range = create_batch_range(x)
 
         # light local attention sees all tokens in a limited context
 
@@ -611,14 +611,17 @@ class ConditionalRoutedAttention(nn.Module):
 
         # select the tokens to be routed to full attention
 
-        routed_tokens_q = x[batch_range, indices_q]
-        routed_tokens_kv = x[batch_range, indices_kv]
+        q_batch_range = create_batch_range(x)
+        routed_tokens_q = x[q_batch_range, indices_q]
+
+        kv_batch_range = create_batch_range(x, right_pad_dims = indices_kv.ndim - 1)
+        routed_tokens_kv = x[kv_batch_range, indices_kv]
 
         # calculate key padding mask
 
         routed_tokens_kv_mask = None
         if exists(mask):
-            routed_tokens_kv_mask = mask[batch_range, indices_kv]
+            routed_tokens_kv_mask = mask[kv_batch_range, indices_kv]
 
         # do the heavier branch with only routed tokens
 
@@ -768,7 +771,7 @@ class ConditionalRoutedAutoregressiveAttention(nn.Module):
         if should_route_kv:
             normalized_scores_kv, indices_kv = self.kv_router(kv, num_tokens = num_heavy_tokens_kv, mask = kv_mask)
 
-            kv_batch_range = create_batch_range(kv)
+            kv_batch_range = create_batch_range(kv, right_pad_dims = indices_kv.ndim - 1)
 
             routed_tokens_kv = kv[kv_batch_range, indices_kv]
             routed_tokens_kv_mask = kv_mask[kv_batch_range, indices_kv]

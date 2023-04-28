@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
   name = 'CoLT5-attention',
   packages = find_packages(),
-  version = '0.3.1',
+  version = '0.3.2',
   license='MIT',
   description = 'Conditionally Routed Attention',
   long_description_content_type = 'text/markdown',
