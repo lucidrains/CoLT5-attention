@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
   name = 'CoLT5-attention',
   packages = find_packages(),
-  version = '0.2.5',
+  version = '0.3.0',
   license='MIT',
   description = 'Conditionally Routed Attention',
   long_description_content_type = 'text/markdown',
@@ -16,7 +16,7 @@ setup(
     'dynamic routing'
   ],
   install_requires=[
-    'einops>=0.6.0',
+    'einops>=0.6.1',
     'local-attention>=1.8.5',
     'torch>=1.10'
   ],
