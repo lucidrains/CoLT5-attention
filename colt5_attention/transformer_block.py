@@ -189,6 +189,11 @@ class DifferentiableTopKRouter(nn.Module):
         self.straight_through = straight_through
         self.temperature = temperature
 
+    def route_back(self, src, routed_tokens, indices):
+        batch_range = create_batch_range(routed_tokens)
+        src[batch_range, indices] = routed_tokens
+        return src
+
     def forward(
         self,
         x,
@@ -266,6 +271,9 @@ class SinkhornRouter(nn.Module):
 
         self.straight_through = straight_through
         self.gumbel_sinkhorn_fn = partial(gumbel_sinkhorn, temperature = temperature, n_iters = n_iters)
+
+    def route_back(self, src, routed_tokens, indices):
+        return scatter_mean(src, routed_tokens, indices, dim = 1)
 
     def forward(
         self,
@@ -357,6 +365,11 @@ class CoordinateDescentRouter(nn.Module):
         self.num_routing_tokens = num_routing_tokens
         self.routing_token = nn.Parameter(torch.randn(num_routing_tokens, dim))
         self.straight_through = straight_through
+
+    def route_back(self, src, routed_tokens, indices):
+        batch_range = create_batch_range(routed_tokens)
+        src[batch_range, indices] = routed_tokens
+        return src
 
     def forward(
         self,
@@ -480,10 +493,7 @@ class ConditionalRoutedFeedForward(nn.Module):
 
         heavy_out = torch.zeros_like(x)
 
-        if self.router_type == 'sinkhorn':
-            heavy_out = scatter_mean(heavy_out, routed_tokens_out, indices, dim = 1)
-        else:
-            heavy_out[batch_range, indices] = routed_tokens_out
+        heavy_out = self.router.route_back(heavy_out, routed_tokens_out, indices)
 
         # sum light and heavy branches
 
@@ -603,11 +613,7 @@ class ConditionalRoutedAttention(nn.Module):
         # scatter back the output of the heavy branch
 
         heavy_out = torch.zeros_like(x)
-
-        if self.router_type == 'sinkhorn':
-            heavy_out = scatter_mean(heavy_out, routed_tokens_out, indices_q, dim = 1)
-        else:
-            heavy_out[batch_range, indices_q] = routed_tokens_out
+        heavy_out = self.q_router.route_back(heavy_out, routed_tokens_out, indices_q)
 
         # sum light and heavy branches
 
@@ -730,10 +736,7 @@ class ConditionalRoutedCrossAttention(nn.Module):
 
         out = torch.zeros_like(x)
 
-        if self.router_type == 'sinkhorn':
-            out = scatter_mean(heavy_out, routed_tokens_out, indices_q, dim = 1)
-        else:
-            out[batch_range, indices_q] = routed_tokens_out
+        out = self.q_router.route_back(out, routed_tokens_out, indices_q)
 
         return out
 
