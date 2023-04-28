@@ -36,6 +36,10 @@ def pad_to_multiple(tensor, multiple, dim=-1, value=0):
     padded_tensor = F.pad(tensor, (*pad_offset, 0, remainder), value = value)
     return padded_tensor, seq_len
 
+def batched_gather(x, indices):
+    batch_range = create_batch_range(indices, indices.ndim - 1)
+    return x[batch_range, indices]
+
 # tensor helpers
 
 def create_batch_range(t, right_pad_dims = 1):
@@ -260,8 +264,7 @@ class DifferentiableTopKRouter(nn.Module):
             selected_scores = selected_scores + (1. - selected_scores).detach()
 
             if exists(mask):
-                batch_range = create_batch_range(x)
-                selected_mask = mask[batch_range, selected_indices]
+                selected_mask = batched_gather(mask, selected_indices)
                 selected_scores = selected_scores.masked_fill(~selected_mask, 0.)
 
         # split out routing dimension again if need be
@@ -347,8 +350,7 @@ class SinkhornRouter(nn.Module):
             selected_scores = selected_scores + (1. - selected_scores).detach()
 
             if exists(mask):
-                batch_range = create_batch_range(x)
-                selected_mask = mask[batch_range, selected_indices]
+                selected_mask = batched_gather(mask, selected_indices)
 
                 selected_scores = selected_scores.masked_fill(~selected_mask, 0.)
 
@@ -434,9 +436,8 @@ class CoordinateDescentRouter(nn.Module):
             # this would make sure all normalized scores returned are 1., but still differentiable using straight-through trick
             selected_scores = selected_scores + (1. - selected_scores).detach()
 
-            if exists(mask):
-                batch_range = create_batch_range(x)
-                selected_mask = mask[batch_range, selected_indices]
+            if exists(mask):                
+                selected_mask = batched_gather(mask, selected_indices)
                 selected_scores = selected_scores.masked_fill(~selected_mask, 0.)
 
         # split out routing dimension again if need be
@@ -495,8 +496,6 @@ class ConditionalRoutedFeedForward(nn.Module):
     ):
         device, num_heavy_tokens = x.device, default(num_heavy_tokens, self.num_heavy_tokens)
 
-        batch_range = create_batch_range(x)
-
         # light feedforward sees all the tokens (hidden dimension is only 1/2 of model dimensions)
 
         light_out = self.light_ff(x)
@@ -507,7 +506,7 @@ class ConditionalRoutedFeedForward(nn.Module):
 
         # select the tokens to be routed to heavier feedforward (hidden dimension is 4 times model dimensions)
 
-        routed_tokens = x[batch_range, indices]
+        routed_tokens = batched_gather(x, indices)
 
         # do the heavier branch with only routed tokens
 
@@ -611,11 +610,10 @@ class ConditionalRoutedAttention(nn.Module):
 
         # select the tokens to be routed to full attention
 
-        q_batch_range = create_batch_range(x)
-        routed_tokens_q = x[q_batch_range, indices_q]
+        routed_tokens_q = batched_gather(x, indices_q)
 
         kv_batch_range = create_batch_range(x, right_pad_dims = indices_kv.ndim - 1)
-        routed_tokens_kv = x[kv_batch_range, indices_kv]
+        routed_tokens_kv = batched_gather(x, indices_kv)
 
         # calculate key padding mask
 
@@ -762,8 +760,7 @@ class ConditionalRoutedAutoregressiveAttention(nn.Module):
         if should_route_q:
             normalized_scores_q, indices_q = self.q_router(q, num_tokens = num_heavy_tokens_q, mask = q_mask)
 
-            q_batch_range = create_batch_range(q)
-            routed_tokens_q = q[q_batch_range, indices_q]
+            routed_tokens_q = batched_gather(q, indices_q)
         else:
             normalized_scores_q = 1.
             routed_tokens_q = q
@@ -771,10 +768,8 @@ class ConditionalRoutedAutoregressiveAttention(nn.Module):
         if should_route_kv:
             normalized_scores_kv, indices_kv = self.kv_router(kv, num_tokens = num_heavy_tokens_kv, mask = kv_mask)
 
-            kv_batch_range = create_batch_range(kv, right_pad_dims = indices_kv.ndim - 1)
-
-            routed_tokens_kv = kv[kv_batch_range, indices_kv]
-            routed_tokens_kv_mask = kv_mask[kv_batch_range, indices_kv]
+            routed_tokens_kv = batched_gather(kv, indices_kv)
+            routed_tokens_kv_mask = batched_gather(kv_mask, indices_kv)
         else:
             normalized_scores_kv = 1.
             routed_tokens_kv = kv
@@ -869,8 +864,6 @@ class ConditionalRoutedCrossAttention(nn.Module):
     ):
         batch, device = x.shape[0], x.device
 
-        batch_range = create_batch_range(x)
-
         # route the queries
 
         query_length = x.shape[-2]
@@ -882,7 +875,7 @@ class ConditionalRoutedCrossAttention(nn.Module):
         if should_route_queries:
             normalized_scores_q, indices_q = self.q_router(x, num_tokens = num_tokens_q, mask = mask)
 
-            routed_tokens_q = x[batch_range, indices_q]
+            routed_tokens_q = batched_gather(x, indices_q)
 
         # route the long contexts
 
@@ -898,12 +891,11 @@ class ConditionalRoutedCrossAttention(nn.Module):
         if should_route_kv:
             normalized_scores_kv, indices_kv = self.kv_router(context, num_tokens = num_tokens_kv, mask = context_mask)
 
-            kv_batch_range = create_batch_range(x, right_pad_dims = indices_kv.ndim - 1)
-            routed_tokens_kv = x[kv_batch_range, indices_kv]
+            routed_tokens_kv = batched_gather(x, indices_kv)
 
             routed_tokens_kv_mask = None
             if exists(context_mask):
-                routed_tokens_kv_mask = context_mask[kv_batch_range, indices_kv]
+                routed_tokens_kv_mask = batched_gather(context_mask, indices_kv)
 
         # do the heavier branch with only routed tokens
 
