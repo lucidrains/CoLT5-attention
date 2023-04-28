@@ -898,11 +898,12 @@ class ConditionalRoutedCrossAttention(nn.Module):
         if should_route_kv:
             normalized_scores_kv, indices_kv = self.kv_router(context, num_tokens = num_tokens_kv, mask = context_mask)
 
-            routed_tokens_kv = x[batch_range, indices_kv]
+            kv_batch_range = create_batch_range(x, right_pad_dims = indices_kv.ndim - 1)
+            routed_tokens_kv = x[kv_batch_range, indices_kv]
 
             routed_tokens_kv_mask = None
             if exists(context_mask):
-                routed_tokens_kv_mask = context_mask[batch_range, indices_kv]
+                routed_tokens_kv_mask = context_mask[kv_batch_range, indices_kv]
 
         # do the heavier branch with only routed tokens
 
