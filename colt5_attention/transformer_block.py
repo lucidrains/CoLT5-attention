@@ -70,6 +70,8 @@ class Attention(nn.Module):
         self.multiply_keys_by_score = multiply_keys_by_score
 
         self.norm = RMSNorm(dim)
+        self.null_kv = nn.Parameter(torch.randn(2, heads, dim_head))
+
         self.to_q = nn.Linear(dim, dim_hidden, bias = False)
         self.to_kv = nn.Linear(dim, dim_hidden * 2, bias = False)
         self.to_out = nn.Linear(dim_hidden, dim, bias = False)
@@ -92,7 +94,7 @@ class Attention(nn.Module):
         i - input model dimension
         """
 
-        h = self.heads
+        batch, h = x.shape[0], self.heads
 
         x = self.norm(x)
 
@@ -141,6 +143,13 @@ class Attention(nn.Module):
 
         k, v = map(lambda t: rearrange(t, 'b r h n d -> b (r h) n d'), (k, v))
 
+        # null key values
+
+        nk, nv = map(lambda t: repeat(t, 'h d -> b h 1 d', b = batch), self.null_kv)
+
+        k = torch.cat((nk, k), dim = -2)
+        v = torch.cat((nv, v), dim = -2)
+
         # scale and get similarity
 
         q = q * self.scale
@@ -153,6 +162,8 @@ class Attention(nn.Module):
                 mask = repeat(mask, 'b r j -> b (r h) 1 j', h = heads_per_route)
             else:
                 mask = rearrange(mask, 'b j -> b 1 1 j')
+
+            mask = F.pad(mask, (1, 0), value = True)
 
             sim = sim.masked_fill(~mask, -torch.finfo(sim.dtype).max)
 
@@ -575,12 +586,131 @@ class ConditionalRoutedAttention(nn.Module):
         num_heavy_tokens_q = default(num_heavy_tokens_q, self.num_heavy_tokens_q)
         num_heavy_tokens_kv = default(num_heavy_tokens_kv, self.num_heavy_tokens_kv)
 
-        batch_range = torch.arange(batch, device = device)
-        batch_range = rearrange(batch_range, 'b -> b 1')
+        batch_range = create_batch_range(x)
 
         # light local attention sees all tokens in a limited context
 
         light_out = self.light_attn(x, mask = mask)
+
+        # route tokens appropriately for heavy branch
+
+        normalized_scores_q, indices_q = self.q_router(x, num_tokens = num_heavy_tokens_q, mask = mask)
+        normalized_scores_kv, indices_kv = self.kv_router(x, num_tokens = num_heavy_tokens_kv, mask = mask)
+
+        # select the tokens to be routed to full attention
+
+        routed_tokens_q = x[batch_range, indices_q]
+        routed_tokens_kv = x[batch_range, indices_kv]
+
+        # calculate key padding mask
+
+        routed_tokens_kv_mask = None
+        if exists(mask):
+            routed_tokens_kv_mask = mask[batch_range, indices_kv]
+
+        # do the heavier branch with only routed tokens
+
+        routed_tokens_out = self.heavy_attn(
+            routed_tokens_q,
+            mask = routed_tokens_kv_mask,
+            context = routed_tokens_kv,
+            normalized_scores_kv = normalized_scores_kv,
+            normalized_scores_q = normalized_scores_q if self.multiply_queries_by_score else None
+        )
+
+        routed_tokens_out = routed_tokens_out * rearrange(normalized_scores_q, '... -> ... 1')
+
+        # scatter back the output of the heavy branch
+
+        heavy_out = torch.zeros_like(x)
+        heavy_out = self.q_router.route_back(heavy_out, routed_tokens_out, indices_q)
+
+        # sum light and heavy branches
+
+        return light_out + heavy_out
+
+# improvised conditionally routed autoregressive attention
+
+class ConditionalRoutedAutoregressiveAttention(nn.Module):
+    def __init__(
+        self,
+        dim,
+        *,
+        num_heavy_tokens_q,
+        num_heavy_tokens_kv,
+        num_routed_kv = 1,
+        light_dim_head = 64,
+        light_heads = 8,
+        light_window_size = 128,        # each token would see ~ 64 tokens either way to left or right
+        heavy_dim_head = 64,
+        heavy_heads = 8,
+        router_straight_through = True, # would make sure all normalized scores are 1., still differentiable
+        router_type = 'coor_descent',
+        router_kwargs: dict = {},
+        multiply_keys_by_score = False,
+        multiply_queries_by_score = False
+    ):
+        super().__init__()
+        assert router_type in ROUTERS.keys()
+
+        self.router_type = router_type
+
+        router_klass = ROUTERS.get(router_type)
+
+        self.num_heavy_tokens_q = num_heavy_tokens_q
+        self.num_heavy_tokens_kv = num_heavy_tokens_kv
+
+        self.multiply_queries_by_score = multiply_queries_by_score
+
+        self.light_window_size = light_window_size
+
+        self.light_attn = LocalMHA(
+            dim = dim,
+            dim_head = light_dim_head,
+            heads = light_heads,
+            window_size = light_window_size,
+            prenorm = True,
+            causal = True,
+            use_rotary_pos_emb = False
+        )
+
+        self.q_router = router_klass(
+            dim = dim,
+            straight_through = router_straight_through,
+            **router_kwargs
+        )
+
+        self.kv_router = router_klass(
+            dim = dim,
+            num_routing_tokens = num_routed_kv,
+            straight_through = router_straight_through,
+            **router_kwargs
+        )
+
+        self.heavy_attn = Attention(
+            dim = dim,
+            dim_head = heavy_dim_head,
+            heads = heavy_heads,
+            multiply_keys_by_score = multiply_keys_by_score
+        )
+
+    def forward(
+        self,
+        x,
+        *,
+        num_heavy_tokens_q = None,
+        num_heavy_tokens_kv = None
+    ):
+        batch, device = x.shape[0], x.device
+
+        num_heavy_tokens_q = default(num_heavy_tokens_q, self.num_heavy_tokens_q)
+        num_heavy_tokens_kv = default(num_heavy_tokens_kv, self.num_heavy_tokens_kv)
+
+        batch_range = create_batch_range(x)
+
+        # light local attention sees all tokens in a limited context
+
+        light_out = self.light_attn(x)
 
         # route tokens appropriately for heavy branch
 
@@ -679,8 +809,7 @@ class ConditionalRoutedCrossAttention(nn.Module):
     ):
         batch, device = x.shape[0], x.device
 
-        batch_range = torch.arange(batch, device = device)
-        batch_range = rearrange(batch_range, 'b -> b 1')
+        batch_range = create_batch_range(x)
 
         # route the queries
 
