@@ -1,6 +1,8 @@
 import torch
 import torch.nn.functional as F
 
+from einops import rearrange
+
 def exists(val):
     return val is not None
 
@@ -19,12 +21,15 @@ def coor_descent(
 
     if not isinstance(k, torch.Tensor):
         k = torch.Tensor([k]).to(s)
+    else:
+        k = rearrange(k, '... -> ... 1')
 
     constant = eps * log(k)
 
     if exists(mask):
         s = s.masked_fill(~mask, mask_value)
 
+    a = 0
     b = -F.relu(s)
 
     for _ in range(n_iters):

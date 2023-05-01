@@ -5,7 +5,7 @@ from torch import Tensor
 from torch import autograd
 import torch.nn.functional as F
 
-from einops import pack, unpack
+from einops import pack, unpack, repeat
 
 try:
     import triton
@@ -44,10 +44,11 @@ def unpack_one(t, ps, pattern):
 def coor_descent_kernel_forward(
     output_ptr,
     input_ptr,
+    k_ptr,
     input_row_stride,
     output_row_stride,
+    k_row_stride,
     n_iters,
-    log_k,
     eps,
     n_cols,
     BLOCK_SIZE: tl.constexpr
@@ -55,21 +56,26 @@ def coor_descent_kernel_forward(
     row_idx = tl.program_id(0)
 
     row_start_ptr = input_ptr + row_idx * input_row_stride
+    k_ptr = k_ptr + row_idx * k_row_stride
 
     col_offsets = tl.arange(0, BLOCK_SIZE)
     input_ptrs = row_start_ptr + col_offsets
 
     mask = col_offsets < n_cols
 
-    constant = eps * log_k
-
     # load the scores s
 
     s = tl.load(input_ptrs, mask = mask, other = -float('inf'))
 
+    # load k - controls the sparsity of output
+
+    k = tl.load(k_ptr)
+
+    constant = tl.log(k) * eps
+
     # initialize a and b for coordinate descent
 
-    a = tl.sum(s, axis = 0)
+    a = k * 0                           # init a to 0, triton needs to know shape and type outside loop
     b = tl.where(s >= 0., -s, 0.)
 
     for _ in range(n_iters):        
@@ -144,8 +150,17 @@ class _coor_descent(autograd.Function):
         k,
         eps
     ):
+        assert x.is_cuda
+
+        batch = x.shape[0]
+
         x, shape = pack_one(x, '* n')
         n_rows, n_cols = x.shape
+
+        if isinstance(k, (int, float)):
+            k = torch.full((n_rows,), k)
+
+        k = k.to(x)
 
         BLOCK_SIZE = triton.next_power_of_2(n_cols)
         num_warps = calc_num_warps(BLOCK_SIZE)
@@ -155,10 +170,11 @@ class _coor_descent(autograd.Function):
         coor_descent_kernel_forward[(n_rows,)](
             y,
             x,
+            k,
             x.stride(0),
             y.stride(0),
+            k.stride(0),
             n_iters,
-            log(k),
             eps,
             n_cols,
             num_warps = num_warps,
@@ -173,6 +189,10 @@ class _coor_descent(autograd.Function):
         ctx,
         grad_probs
     ):
+        assert grad_probs.is_cuda
+
+        batch = grad_probs.shape[0]
+
         probs, = ctx.saved_tensors
 
         grad_probs, shape = pack_one(grad_probs, '* n')
