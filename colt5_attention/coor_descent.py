@@ -13,20 +13,23 @@ def coor_descent(
     n_iters,
     k,
     eps = 1e-1,
-    clamp_fn = F.relu,
-    mask = None,
+    mask = None
 ):
     mask_value = -torch.finfo(s.dtype).max
+
+    if not isinstance(k, torch.Tensor):
+        k = torch.Tensor([k]).to(s)
+
     constant = eps * log(k)
 
-    b = -clamp_fn(s)
+    b = -F.relu(s)
 
     for _ in range(n_iters):
         if exists(mask):
             s = s.masked_fill(~mask, mask_value)
 
         a = constant - eps * ((s + b) / eps).logsumexp(dim = -1, keepdim = True)
-        b = -clamp_fn(s + a)
+        b = -F.relu(s + a)
 
     if exists(mask):
         s = s.masked_fill(~mask, mask_value)
