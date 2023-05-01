@@ -124,8 +124,8 @@ cross_attn_out.shape # (2, 1024, 512) - same as tokens
 - [x] add the coordinate descent method as another router
 - [x] allow for multi-headed routing (multiple routing tokens), only for key-values
 - [x] add an autoregressive version of the conditionally routed attention
+- [x] test out the autoregressive version and verify that more routed key / value tokens lead to better results - it works
 
-- [ ] test out the autoregressive version and verify that more routed key / value tokens lead to better results
 - [ ] for variable sequence lengths, allow for setting k as a function of sequence lengths per sample in batch
 - [ ] create a variant of CoLT5 for high resolution feature maps (image attention) - then try out for diffusion
 - [ ] in the cross attention scenario, support for routing token that first queries the source tokens, before retrieving from memories
