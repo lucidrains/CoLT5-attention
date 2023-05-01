@@ -130,7 +130,9 @@ cross_attn_out.shape # (2, 1024, 512) - same as tokens
 - [ ] create a variant of CoLT5 for high resolution feature maps (image attention) - then try out for diffusion
 - [ ] in the cross attention scenario, support for routing token that first queries the source tokens, before retrieving from memories
 - [ ] make flash attention compatible
-- [ ] work out a triton forward / backward version of coordinate descent (coor_descent), as it seems torch compile does not work well enough for coor_descent function just yet
+- [ ] fused coordinate descent kernel using triton
+    - [x] forwards        
+    - [ ] backwards
 
 ## Citations
 
@@ -139,5 +141,14 @@ cross_attn_out.shape # (2, 1024, 512) - same as tokens
     title   = {CoLT5: Faster Long-Range Transformers with Conditional Computation},
     author  = {Joshua Ainslie and Tao Lei and Michiel de Jong and Santiago Ontan'on and Siddhartha Brahma and Yury Zemlyanskiy and David Uthus and Mandy Guo and James Lee-Thorp and Yi Tay and Yun-Hsuan Sung and Sumit Sanghai},
     year    = {2023}
+}
+```
+
+```bibtex
+@article{Tillet2019TritonAI,
+    title   = {Triton: an intermediate language and compiler for tiled neural network computations},
+    author  = {Philippe Tillet and H. Kung and D. Cox},
+    journal = {Proceedings of the 3rd ACM SIGPLAN International Workshop on Machine Learning and Programming Languages},
+    year    = {2019}
 }
 ```
