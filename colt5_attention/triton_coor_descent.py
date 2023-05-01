@@ -111,32 +111,83 @@ def coor_descent_kernel_backward(
     output_ptr,
     input_ptr,
     grad_ptr,
+    k_ptr,
+    k_row_stride,
     grad_row_stride,
     input_row_stride,
     output_row_stride,
+    n_iters,
+    eps,
     n_cols,
     BLOCK_SIZE: tl.constexpr
 ):
     row_idx = tl.program_id(0)
-
-    row_start_ptr = input_ptr + row_idx * input_row_stride
-    grad_row_start_ptr = grad_ptr + row_idx * grad_row_stride
-
     col_offsets = tl.arange(0, BLOCK_SIZE)
-    input_ptrs = row_start_ptr + col_offsets
-    grad_ptrs = grad_row_start_ptr + col_offsets
-
     mask = col_offsets < n_cols
 
-    probs_row = tl.load(input_ptrs, mask = mask, other = 0.)
+    # load input
+
+    row_start_ptr = input_ptr + row_idx * input_row_stride
+    input_ptrs = row_start_ptr + col_offsets
+
+    s = tl.load(input_ptrs, mask = mask, other = -float('inf'))
+
+    # load k - controls the sparsity of output
+
+    k_ptr = k_ptr + row_idx * k_row_stride
+
+    k = tl.load(k_ptr)
+    constant = tl.log(k) * eps
+
+    # load grads
+
+    grad_row_start_ptr = grad_ptr + row_idx * grad_row_stride
+    grad_ptrs = grad_row_start_ptr + col_offsets
+
     grad_row = tl.load(grad_ptrs, mask = mask, other = 0.)
 
-    dxhat = probs_row * grad_row
-    softmax_grad_output = dxhat - probs_row * tl.sum(dxhat, axis = 0)
+    # recompute
+
+    a = k * 0
+    b = tl.where(s >= 0., -s, 0.)
+
+    for _ in range(n_iters):
+
+        a = (s + b) / eps
+
+        # stable log sum exp
+
+        a_max = tl.max(a, axis = 0)
+        a_minus_max = a - a_max
+        exp = tl.exp(a_minus_max)
+        sum_exp = tl.sum(exp, axis = 0)
+        log_sum_exp = tl.log(sum_exp) + a_max
+
+        a = constant - eps * log_sum_exp
+
+        # update b
+
+        b = s + a
+        b = tl.where(b >= 0., -b, 0.)
+
+    o = tl.exp((s + a + b) / eps)
+
+    # backwards (wip)
+
+    ds = grad_row * o
+    ds = ds / eps
+
+    da = ds
+    db = ds
+
+    ds = ds + db * tl.where(s >= 0., -1., 0.)
+
+    # store output
 
     output_row_start_ptr = output_ptr + row_idx * output_row_stride
     output_ptrs = output_row_start_ptr + col_offsets
-    tl.store(output_ptrs, softmax_grad_output, mask = mask)
+
+    tl.store(output_ptrs, ds, mask = mask)
 
 # function forwards and backwards
 
@@ -152,9 +203,10 @@ class _coor_descent(autograd.Function):
     ):
         assert x.is_cuda
 
-        batch = x.shape[0]
+        batch, requires_grad = x.shape[0], x.requires_grad
 
         x, shape = pack_one(x, '* n')
+
         n_rows, n_cols = x.shape
 
         if isinstance(k, (int, float)):
@@ -181,6 +233,10 @@ class _coor_descent(autograd.Function):
             BLOCK_SIZE = BLOCK_SIZE,
         )
 
+        if requires_grad:
+            ctx.args = (n_iters, eps)
+            ctx.save_for_backward(x, k)
+
         return unpack_one(y, shape, '* n')
 
     @classmethod
@@ -193,7 +249,8 @@ class _coor_descent(autograd.Function):
 
         batch = grad_probs.shape[0]
 
-        probs, = ctx.saved_tensors
+        n_iters, eps = ctx.args
+        x, k = ctx.saved_tensors
 
         grad_probs, shape = pack_one(grad_probs, '* n')
         n_rows, n_cols = grad_probs.shape
@@ -201,15 +258,19 @@ class _coor_descent(autograd.Function):
         BLOCK_SIZE = triton.next_power_of_2(n_cols)
         num_warps = calc_num_warps(BLOCK_SIZE)
 
-        dx = torch.empty_like(probs)
+        dx = torch.empty_like(grad_probs)
 
         coor_descent_kernel_backward[(n_rows,)](
             dx,
-            probs,
+            x,
             grad_probs,
+            k,
+            k.stride(0),
             grad_probs.stride(0),
-            probs.stride(0),
+            x.stride(0),
             dx.stride(0),
+            n_iters,
+            eps,
             n_cols,
             num_warps = num_warps,
             BLOCK_SIZE = BLOCK_SIZE
