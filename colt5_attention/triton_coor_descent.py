@@ -148,39 +148,84 @@ def coor_descent_kernel_backward(
 
     # recompute
 
-    a = k * 0
-    b = tl.where(s >= 0., -s, 0.)
+    init_a = k * 0
+    init_b = tl.where(s >= 0., -s, 0.)
+
+    a = init_a
+    b = init_b
 
     for _ in range(n_iters):
 
-        a = (s + b) / eps
+        sb = (s + b) / eps
 
         # stable log sum exp
 
-        a_max = tl.max(a, axis = 0)
-        a_minus_max = a - a_max
-        exp = tl.exp(a_minus_max)
+        sb_max = tl.max(sb, axis = 0)
+        sb_minus_max = sb - sb_max
+        exp = tl.exp(sb_minus_max)
         sum_exp = tl.sum(exp, axis = 0)
-        log_sum_exp = tl.log(sum_exp) + a_max
+        log_sum_exp = tl.log(sum_exp) + sb_max
 
         a = constant - eps * log_sum_exp
 
         # update b
 
-        b = s + a
-        b = tl.where(b >= 0., -b, 0.)
+        sa = s + a
+        b = tl.where(sa >= 0., -sa, 0.)
 
     o = tl.exp((s + a + b) / eps)
 
     # backwards (wip)
 
     ds = grad_row * o
-    ds = ds / eps
+    ds /= eps
 
-    da = ds
+    last_da = tl.sum(ds, axis = 0)
     db = ds
 
-    ds = ds + db * tl.where(s >= 0., -1., 0.)
+    for desc_n_iters in range(n_iters, 0, -1):
+        a = init_a
+        b = init_b
+
+        sa = s * 1
+        exp = s * 1
+        sum_exp = k * 0
+
+        for _ in range(desc_n_iters):
+            sb = (s + b) / eps
+
+            # stable log sum exp
+
+            sb_max = tl.max(sb, axis = 0)
+            sb_minus_max = sb - sb_max
+            exp = tl.exp(sb_minus_max)
+            sum_exp = tl.sum(exp, axis = 0)
+            log_sum_exp = tl.log(sum_exp) + sb_max
+
+            a = constant - eps * log_sum_exp
+
+            # update b
+
+            sa = s + a
+            b = tl.where(sa >= 0., -sa, 0.)
+
+        # go backwards
+
+        dsa = db * tl.where(sa >= 0, -1., 0.)
+        ds += dsa
+
+        da = tl.sum(dsa, axis = 0) + last_da
+        da *= -eps
+
+        dsb = exp * da / sum_exp
+        dsb /= eps
+
+        ds += dsb
+        db = dsb
+
+        last_da = 0.
+
+    ds += db * tl.where(s >= 0., -1., 0.)
 
     # store output
 
