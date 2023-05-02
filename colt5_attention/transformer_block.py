@@ -754,6 +754,8 @@ class ConditionalRoutedAutoregressiveAttention(nn.Module):
 
         window_size = self.heavy_window_size
 
+        x = x[:, window_size:] # the first window has nothing to attend to, just crop out to save some simplicity with nothing being route-able
+
         x, seq_len = pad_to_multiple(x, window_size, dim = -2)
 
         padded_seq_len = x.shape[-2]
@@ -774,7 +776,7 @@ class ConditionalRoutedAutoregressiveAttention(nn.Module):
 
         kv = repeat(x, 'b n d -> (b m) n d', m = windows)
 
-        kv_mask = torch.ones((windows, windows), dtype = torch.bool, device = device).tril(-1)
+        kv_mask = torch.ones((windows, windows), dtype = torch.bool, device = device).tril()
         kv_mask = repeat(kv_mask, 'm n -> (b m) (n w)', b = batch, w = window_size)
 
         # route tokens appropriately for heavy branch, if need be
@@ -824,6 +826,8 @@ class ConditionalRoutedAutoregressiveAttention(nn.Module):
 
         heavy_out = rearrange(heavy_out, '(b n) w d -> b (n w) d', b = batch)
         heavy_out = heavy_out[:, :seq_len]
+
+        heavy_out = F.pad(heavy_out, (0, 0, window_size, 0), value = 0.)
 
         # sum light and heavy branches
 

@@ -46,8 +46,8 @@ def coor_descent_kernel_forward(
     output_ptr,
     input_ptr,
     k_ptr,
-    input_row_stride,
     output_row_stride,
+    input_row_stride,
     k_row_stride,
     n_iters,
     eps,
@@ -78,8 +78,9 @@ def coor_descent_kernel_forward(
 
     # initialize a and b for coordinate descent
 
-    a = k * 0                           # init a to 0, triton needs to know shape and type outside loop
-    b = -s
+    a = k * 0 # init a to 0, triton needs to know shape and type outside loop
+
+    b = tl.where(mask, -s, -float('inf'))
 
     for _ in range(n_iters):        
 
@@ -115,10 +116,10 @@ def coor_descent_kernel_backward(
     input_ptr,
     grad_ptr,
     k_ptr,
-    k_row_stride,
-    grad_row_stride,
-    input_row_stride,
     output_row_stride,
+    input_row_stride,
+    grad_row_stride,
+    k_row_stride,
     n_iters,
     eps,
     n_cols,
@@ -152,7 +153,7 @@ def coor_descent_kernel_backward(
     # recompute
 
     init_a = k * 0
-    init_b = -s
+    init_b = tl.where(mask, -s, -float('inf'))
 
     ds = s * 0
     db = s * 0
@@ -254,6 +255,8 @@ class _coor_descent(autograd.Function):
 
         if isinstance(k, (int, float)):
             k = torch.full((n_rows,), k)
+        elif k.ndim == 1:
+            k = repeat(k, 'n -> (b n)', b = x.shape[0] // k.shape[0])
 
         k = k.to(x)
 
@@ -266,8 +269,8 @@ class _coor_descent(autograd.Function):
             y,
             x,
             k,
-            x.stride(0),
             y.stride(0),
+            x.stride(0),
             k.stride(0),
             n_iters,
             eps,
@@ -281,9 +284,6 @@ class _coor_descent(autograd.Function):
             ctx.save_for_backward(x, k)
 
         y = unpack_one(y, shape, '* n')
-
-        if exists(mask):
-            y = y.masked_fill(~mask, 0.)
 
         return y
 
@@ -313,10 +313,10 @@ class _coor_descent(autograd.Function):
             x,
             grad_probs,
             k,
-            k.stride(0),
-            grad_probs.stride(0),
-            x.stride(0),
             dx.stride(0),
+            x.stride(0),
+            grad_probs.stride(0),
+            k.stride(0),
             n_iters,
             eps,
             n_cols,
@@ -324,7 +324,9 @@ class _coor_descent(autograd.Function):
             BLOCK_SIZE = BLOCK_SIZE
         )
 
-        return unpack_one(dx, shape, '* n'), None, None, None, None
+        dx = unpack_one(dx, shape, '* n')
+
+        return dx, None, None, None, None
 
 def triton_coor_descent(
     s,
