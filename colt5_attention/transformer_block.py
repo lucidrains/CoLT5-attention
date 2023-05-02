@@ -754,8 +754,6 @@ class ConditionalRoutedAutoregressiveAttention(nn.Module):
 
         window_size = self.heavy_window_size
 
-        x = x[:, window_size:] # the first window has nothing to attend to, just crop out to save some simplicity with nothing being route-able
-
         x, seq_len = pad_to_multiple(x, window_size, dim = -2)
 
         padded_seq_len = x.shape[-2]
@@ -765,19 +763,27 @@ class ConditionalRoutedAutoregressiveAttention(nn.Module):
         q_mask = torch.ones((batch, seq_len), dtype = torch.bool, device = device)
         q_mask = F.pad(q_mask, (0, padded_seq_len - seq_len), value = False)
 
+        # handy function
+
+        merge_to_batch = lambda t: rearrange(t, 'b n ... -> (b n) ...')
+
         # block the sequence and mask into windows for the queries
 
-        q = rearrange(x, 'b (n w) d -> (b n) w d', w = window_size)
-        q_mask = rearrange(q_mask, 'b (n w) -> (b n) w', w = window_size)
+        q = rearrange(x, 'b (n w) d -> b n w d', w = window_size)
+        q_mask = rearrange(q_mask, 'b (n w) -> b n w', w = window_size)
+
+        q, q_mask = map(merge_to_batch, (q[:, 1:], q_mask[:, 1:]))
 
         # each block of queries attend to sequences that are causally masked out appropriately
 
         windows = padded_seq_len // window_size
 
-        kv = repeat(x, 'b n d -> (b m) n d', m = windows)
+        kv = repeat(x, 'b n d -> b m n d', m = windows)
 
-        kv_mask = torch.ones((windows, windows), dtype = torch.bool, device = device).tril()
-        kv_mask = repeat(kv_mask, 'm n -> (b m) (n w)', b = batch, w = window_size)
+        kv_mask = torch.ones((windows, windows), dtype = torch.bool, device = device).tril(-1)
+        kv_mask = repeat(kv_mask, 'm n -> b m (n w)', b = batch, w = window_size)
+
+        kv, kv_mask = map(merge_to_batch, (kv[:, 1:], kv_mask[:, 1:]))
 
         # route tokens appropriately for heavy branch, if need be
 
@@ -825,7 +831,7 @@ class ConditionalRoutedAutoregressiveAttention(nn.Module):
         # un-window and slice out original sequence
 
         heavy_out = rearrange(heavy_out, '(b n) w d -> b (n w) d', b = batch)
-        heavy_out = heavy_out[:, :seq_len]
+        heavy_out = heavy_out[:, :(seq_len - window_size)]
 
         heavy_out = F.pad(heavy_out, (0, 0, window_size, 0), value = 0.)
 
