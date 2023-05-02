@@ -151,47 +151,24 @@ def coor_descent_kernel_backward(
     init_a = k * 0
     init_b = tl.where(s >= 0., -s, 0.)
 
-    a = init_a
-    b = init_b
+    ds = s * 0
+    db = s * 0
+    last_da = k * 0
 
-    for _ in range(n_iters):
+    # backwards
 
-        sb = (s + b) / eps
+    for ind in range(n_iters):
+        is_first = ind == 0
 
-        # stable log sum exp
-
-        sb_max = tl.max(sb, axis = 0)
-        sb_minus_max = sb - sb_max
-        exp = tl.exp(sb_minus_max)
-        sum_exp = tl.sum(exp, axis = 0)
-        log_sum_exp = tl.log(sum_exp) + sb_max
-
-        a = constant - eps * log_sum_exp
-
-        # update b
-
-        sa = s + a
-        b = tl.where(sa >= 0., -sa, 0.)
-
-    o = tl.exp((s + a + b) / eps)
-
-    # backwards (wip)
-
-    ds = grad_row * o
-    ds /= eps
-
-    last_da = tl.sum(ds, axis = 0)
-    db = ds
-
-    for desc_n_iters in range(n_iters, 0, -1):
         a = init_a
         b = init_b
 
-        sa = s * 1
-        exp = s * 1
+        sa = s * 0
+        exp = s * 0
         sum_exp = k * 0
 
-        for _ in range(desc_n_iters):
+        for _ in range(n_iters - ind):
+
             sb = (s + b) / eps
 
             # stable log sum exp
@@ -209,21 +186,32 @@ def coor_descent_kernel_backward(
             sa = s + a
             b = tl.where(sa >= 0., -sa, 0.)
 
+        if is_first:
+            o = tl.exp((s + a + b) / eps)
+
+            ds = grad_row * o
+            ds /= eps
+
+            last_da = tl.sum(ds, axis = 0)
+            db = ds
+
         # go backwards
 
-        dsa = db * tl.where(sa >= 0, -1., 0.)
-        ds += dsa
+        if n_iters > 0:
 
-        da = tl.sum(dsa, axis = 0) + last_da
-        da *= -eps
+            dsa = db * tl.where(sa >= 0, -1., 0.)
+            ds += dsa
 
-        dsb = exp * da / sum_exp
-        dsb /= eps
+            da = tl.sum(dsa, axis = 0) + last_da
+            da *= -eps
 
-        ds += dsb
-        db = dsb
+            dsb = exp * da / sum_exp
+            dsb /= eps
 
-        last_da = 0.
+            ds += dsb
+            db = dsb
+
+            last_da = 0.
 
     ds += db * tl.where(s >= 0., -1., 0.)
 
