@@ -33,9 +33,17 @@ def coor_descent(
     b = -s
 
     for _ in range(n_iters):
+        sb = ((s + b) / eps)
 
-        a = constant - eps * ((s + b) / eps).logsumexp(dim = -1, keepdim = True)
+        if exists(mask):
+            sb = sb.masked_fill(~mask, mask_value)
+
+        a = constant - eps * sb.logsumexp(dim = -1, keepdim = True)
         b = -F.relu(s + a)
 
     scores = ((s + a + b) / eps).exp()
+
+    if exists(mask):
+        scores = scores.masked_fill(~mask, 0.)
+
     return scores

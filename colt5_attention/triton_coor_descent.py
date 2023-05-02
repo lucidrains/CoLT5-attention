@@ -45,9 +45,11 @@ def unpack_one(t, ps, pattern):
 def coor_descent_kernel_forward(
     output_ptr,
     input_ptr,
+    mask_ptr,
     k_ptr,
     output_row_stride,
     input_row_stride,
+    mask_row_stride,
     k_row_stride,
     n_iters,
     eps,
@@ -62,7 +64,15 @@ def coor_descent_kernel_forward(
     col_offsets = tl.arange(0, BLOCK_SIZE)
     input_ptrs = row_start_ptr + col_offsets
 
-    mask = col_offsets < n_cols
+    col_mask = col_offsets < n_cols
+
+    # load mask as ints (for some reason as boolean breaks triton)
+
+    mask_start_ptr = mask_ptr + row_idx * mask_row_stride
+    mask_ptrs = mask_start_ptr + col_offsets
+
+    mask_ints = tl.load(mask_ptrs, mask = col_mask, other = 0)
+    mask = mask_ints == 1
 
     # load the scores s
 
@@ -80,11 +90,12 @@ def coor_descent_kernel_forward(
 
     a = k * 0 # init a to 0, triton needs to know shape and type outside loop
 
-    b = tl.where(mask, -s, -float('inf'))
+    b = -s
 
     for _ in range(n_iters):        
 
         a = (s + b) * inv_eps
+        a = tl.where(mask, a, -float('inf'))
 
         # stable log sum exp
 
@@ -106,7 +117,8 @@ def coor_descent_kernel_forward(
     output_row_start_ptr = output_ptr + row_idx * output_row_stride
     output_ptrs = output_row_start_ptr + col_offsets
 
-    tl.store(output_ptrs, s, mask = mask)
+    s = tl.where(mask, s, 0.)
+    tl.store(output_ptrs, s)
 
 # backwards
 
@@ -114,10 +126,12 @@ def coor_descent_kernel_forward(
 def coor_descent_kernel_backward(
     output_ptr,
     input_ptr,
+    mask_ptr,
     grad_ptr,
     k_ptr,
     output_row_stride,
     input_row_stride,
+    mask_row_stride,
     grad_row_stride,
     k_row_stride,
     n_iters,
@@ -127,7 +141,18 @@ def coor_descent_kernel_backward(
 ):
     row_idx = tl.program_id(0)
     col_offsets = tl.arange(0, BLOCK_SIZE)
-    mask = col_offsets < n_cols
+
+    # load and generate mask
+
+    col_mask = col_offsets < n_cols
+
+    # load mask as ints (for some reason as boolean breaks triton)
+
+    mask_start_ptr = mask_ptr + row_idx * mask_row_stride
+    mask_ptrs = mask_start_ptr + col_offsets
+
+    mask_ints = tl.load(mask_ptrs, mask = col_mask, other = 0)
+    mask = mask_ints == 1
 
     # load input
 
@@ -153,7 +178,7 @@ def coor_descent_kernel_backward(
     # recompute
 
     init_a = k * 0
-    init_b = tl.where(mask, -s, -float('inf'))
+    init_b = -s
 
     ds = s * 0
     db = s * 0
@@ -170,12 +195,12 @@ def coor_descent_kernel_backward(
         b = init_b
 
         sa = s * 0
-        exp = s * 0
-        sum_exp = k * 0
+        softmax = s * 0
 
         for _ in range(n_iters - ind):
 
             sb = (s + b) * inv_eps
+            sb = tl.where(mask, sb, -float('inf'))
 
             # stable log sum exp
 
@@ -183,6 +208,7 @@ def coor_descent_kernel_backward(
             sb_minus_max = sb - sb_max
             exp = tl.exp(sb_minus_max)
             sum_exp = tl.sum(exp, axis = 0)
+            softmax = exp / sum_exp
             log_sum_exp = tl.log(sum_exp) + sb_max
 
             a = constant - eps * log_sum_exp
@@ -195,8 +221,12 @@ def coor_descent_kernel_backward(
         if is_first:
             o = tl.exp((s + a + b) * inv_eps)
 
+            o = tl.where(mask, o, 0.)
+
             ds = grad_row * o
             ds *= inv_eps
+
+            ds = tl.where(mask, ds, 0.)
 
             last_da = tl.sum(ds, axis = 0)
             db = ds
@@ -211,7 +241,7 @@ def coor_descent_kernel_backward(
             da = tl.sum(dsa, axis = 0) + last_da
             da *= -eps
 
-            dsb = exp * da / sum_exp
+            dsb = da * softmax
             dsb *= inv_eps
 
             ds += dsb
@@ -226,7 +256,8 @@ def coor_descent_kernel_backward(
     output_row_start_ptr = output_ptr + row_idx * output_row_stride
     output_ptrs = output_row_start_ptr + col_offsets
 
-    tl.store(output_ptrs, ds, mask = mask)
+    ds = tl.where(mask, ds, 0.)
+    tl.store(output_ptrs, ds)
 
 # function forwards and backwards
 
@@ -245,11 +276,14 @@ class _coor_descent(autograd.Function):
 
         batch, requires_grad = x.shape[0], x.requires_grad
 
-        if exists(mask):
-            mask_value = -torch.finfo(x.dtype).max
-            x = x.masked_fill(~mask, mask_value)
+        if not exists(mask):
+            mask = torch.ones_like(x, dtype = torch.bool, device = x.device)
 
         x, shape = pack_one(x, '* n')
+        mask, _ = pack_one(mask, '* n')
+
+        x = x.masked_fill(~mask, -torch.finfo(x.dtype).max)
+        mask_ints = mask.int()
 
         n_rows, n_cols = x.shape
 
@@ -268,9 +302,11 @@ class _coor_descent(autograd.Function):
         coor_descent_kernel_forward[(n_rows,)](
             y,
             x,
+            mask_ints,
             k,
             y.stride(0),
             x.stride(0),
+            mask_ints.stride(0),
             k.stride(0),
             n_iters,
             eps,
@@ -281,7 +317,7 @@ class _coor_descent(autograd.Function):
 
         if requires_grad:
             ctx.args = (n_iters, eps)
-            ctx.save_for_backward(x, k)
+            ctx.save_for_backward(x, k, mask)
 
         y = unpack_one(y, shape, '* n')
 
@@ -298,7 +334,10 @@ class _coor_descent(autograd.Function):
         batch = grad_probs.shape[0]
 
         n_iters, eps = ctx.args
-        x, k = ctx.saved_tensors
+        x, k, mask = ctx.saved_tensors
+
+        if exists(mask):
+            grad_probs = grad_probs.masked_fill(~mask, 0.)
 
         grad_probs, shape = pack_one(grad_probs, '* n')
         n_rows, n_cols = grad_probs.shape
@@ -308,13 +347,17 @@ class _coor_descent(autograd.Function):
 
         dx = torch.empty_like(grad_probs)
 
+        mask_int = mask.int()
+
         coor_descent_kernel_backward[(n_rows,)](
             dx,
             x,
+            mask_int,
             grad_probs,
             k,
             dx.stride(0),
             x.stride(0),
+            mask_int.stride(0),
             grad_probs.stride(0),
             k.stride(0),
             n_iters,
