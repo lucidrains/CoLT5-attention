@@ -232,11 +232,16 @@ class _coor_descent(autograd.Function):
         x,
         n_iters,
         k,
-        eps
+        eps,
+        mask
     ):
         assert x.is_cuda
 
         batch, requires_grad = x.shape[0], x.requires_grad
+
+        if exists(mask):
+            mask_value = -torch.finfo(x.dtype).max
+            x = x.masked_fill(~mask, mask_value)
 
         x, shape = pack_one(x, '* n')
 
@@ -309,6 +314,14 @@ class _coor_descent(autograd.Function):
             BLOCK_SIZE = BLOCK_SIZE
         )
 
-        return unpack_one(dx, shape, '* n'), None, None, None
+        return unpack_one(dx, shape, '* n'), None, None, None, None
 
-triton_coor_descent = _coor_descent.apply
+def triton_coor_descent(
+    s,
+    *,
+    n_iters,
+    k,
+    eps = 1e-1,
+    mask = None
+):
+    return _coor_descent.apply(s, n_iters, k, eps, mask)
