@@ -132,7 +132,9 @@ cross_attn_out.shape # (2, 1024, 512) - same as tokens
 - [ ] make flash attention compatible
 - [ ] fused coordinate descent kernel using triton
     - [x] forwards        
-    - [ ] backwards
+    - [x] backwards
+    - [ ] allow for saving intermediates every number of iterations - trading memory for recompute efficiency during backwards
+    - [ ] add some tests and benchmark for triton vs plain pytorch coor_descent
 
 ## Citations
 
