@@ -140,6 +140,7 @@ cross_attn_out.shape # (2, 1024, 512) - same as tokens
     - [x] handle edge case for when a row is completely masked out for triton, or simply enforce it never to be so
     - [ ] allow for saving intermediates every number of iterations - trading memory for recompute efficiency during backwards
     - [ ] maximum block size in triton allowed is 131k, make sure at least quarter of million sequence length can be reached
+    - [ ] issue with intermittent gradient errors is because of masking - load the key padding mask into triton and mask out during each iteration
 
 ## Citations
 
