@@ -134,9 +134,10 @@ cross_attn_out.shape # (2, 1024, 512) - same as tokens
     - [x] forwards        
     - [x] backwards
     - [x] add some tests and benchmark for triton vs plain pytorch coor_descent - 25x faster for forward, 1.5x faster for backwards and memory saved is n_iters times
+    - [x] fall back on plain coordinate descent for cpu
     - [ ] allow for saving intermediates every number of iterations - trading memory for recompute efficiency during backwards
     - [ ] maximum block size in triton allowed is 131k, make sure at least quarter of million sequence length can be reached
-    - [ ] fall back on plain coordinate descent for cpu
+    - [ ] handle edge case for when a row is completely masked out for triton, or simply enforce it never to be so
 
 ## Citations
 

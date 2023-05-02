@@ -30,7 +30,7 @@ def coor_descent(
         s = s.masked_fill(~mask, mask_value)
 
     a = 0
-    b = -F.relu(s)
+    b = -s
 
     for _ in range(n_iters):
 

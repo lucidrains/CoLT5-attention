@@ -5,6 +5,7 @@ from torch import Tensor
 from torch import autograd
 import torch.nn.functional as F
 
+from colt5_attention.coor_descent import coor_descent
 from einops import pack, unpack, repeat
 
 try:
@@ -73,14 +74,16 @@ def coor_descent_kernel_forward(
 
     constant = tl.log(k) * eps
 
+    inv_eps = 1. / eps
+
     # initialize a and b for coordinate descent
 
     a = k * 0                           # init a to 0, triton needs to know shape and type outside loop
-    b = tl.where(s >= 0., -s, 0.)
+    b = -s
 
     for _ in range(n_iters):        
 
-        a = (s + b) / eps
+        a = (s + b) * inv_eps
 
         # stable log sum exp
 
@@ -97,7 +100,7 @@ def coor_descent_kernel_forward(
         b = s + a
         b = tl.where(b >= 0., -b, 0.)
 
-    s = tl.exp((s + a + b) / eps)
+    s = tl.exp((s + a + b) * inv_eps)
 
     output_row_start_ptr = output_ptr + row_idx * output_row_stride
     output_ptrs = output_row_start_ptr + col_offsets
@@ -149,11 +152,13 @@ def coor_descent_kernel_backward(
     # recompute
 
     init_a = k * 0
-    init_b = tl.where(s >= 0., -s, 0.)
+    init_b = -s
 
     ds = s * 0
     db = s * 0
     last_da = k * 0
+
+    inv_eps = 1. / eps
 
     # backwards
 
@@ -169,7 +174,7 @@ def coor_descent_kernel_backward(
 
         for _ in range(n_iters - ind):
 
-            sb = (s + b) / eps
+            sb = (s + b) * inv_eps
 
             # stable log sum exp
 
@@ -187,10 +192,10 @@ def coor_descent_kernel_backward(
             b = tl.where(sa >= 0., -sa, 0.)
 
         if is_first:
-            o = tl.exp((s + a + b) / eps)
+            o = tl.exp((s + a + b) * inv_eps)
 
             ds = grad_row * o
-            ds /= eps
+            ds *= inv_eps
 
             last_da = tl.sum(ds, axis = 0)
             db = ds
@@ -206,14 +211,14 @@ def coor_descent_kernel_backward(
             da *= -eps
 
             dsb = exp * da / sum_exp
-            dsb /= eps
+            dsb *= inv_eps
 
             ds += dsb
             db = dsb
 
             last_da = 0.
 
-    ds += db * tl.where(s >= 0., -1., 0.)
+    ds += -db
 
     # store output
 
@@ -275,7 +280,12 @@ class _coor_descent(autograd.Function):
             ctx.args = (n_iters, eps)
             ctx.save_for_backward(x, k)
 
-        return unpack_one(y, shape, '* n')
+        y = unpack_one(y, shape, '* n')
+
+        if exists(mask):
+            y = y.masked_fill(~mask, 0.)
+
+        return y
 
     @classmethod
     def backward(
@@ -324,4 +334,7 @@ def triton_coor_descent(
     eps = 1e-1,
     mask = None
 ):
+    if not s.is_cuda:
+        return coor_descent(s, n_iters = n_iters, k = k, eps = eps, mask = mask)
+
     return _coor_descent.apply(s, n_iters, k, eps, mask)

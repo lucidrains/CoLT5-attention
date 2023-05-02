@@ -920,7 +920,7 @@ class ConditionalRoutedCrossAttention(nn.Module):
         if should_route_kv:
             normalized_scores_kv, indices_kv = self.kv_router(context, num_tokens = num_tokens_kv, mask = context_mask)
 
-            routed_tokens_kv = batched_gather(x, indices_kv)
+            routed_tokens_kv = batched_gather(context, indices_kv)
 
             routed_tokens_kv_mask = None
             if exists(context_mask):
