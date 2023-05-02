@@ -14,6 +14,8 @@ Update: unsure of how the routing normalized scores for the key-values are used.
 
 - <a href="https://github.com/arogozhnikov/einops">einops</a> for making my life easy
 
+- <a href="https://github.com/openai/triton">Triton</a> for allowing me to speed up coordinate descent with a fused implementation in just 2 days, sparing me from having to write a thousand lines of CUDA code
+
 ## Install
 
 ```bash
@@ -135,9 +137,9 @@ cross_attn_out.shape # (2, 1024, 512) - same as tokens
     - [x] backwards
     - [x] add some tests and benchmark for triton vs plain pytorch coor_descent - 10x faster for forward, 4x faster for backwards and memory saved is n_iters times
     - [x] fall back on plain coordinate descent for cpu
+    - [x] handle edge case for when a row is completely masked out for triton, or simply enforce it never to be so
     - [ ] allow for saving intermediates every number of iterations - trading memory for recompute efficiency during backwards
     - [ ] maximum block size in triton allowed is 131k, make sure at least quarter of million sequence length can be reached
-    - [ ] handle edge case for when a row is completely masked out for triton, or simply enforce it never to be so
 
 ## Citations
 
