@@ -133,8 +133,10 @@ cross_attn_out.shape # (2, 1024, 512) - same as tokens
 - [ ] fused coordinate descent kernel using triton
     - [x] forwards        
     - [x] backwards
+    - [x] add some tests and benchmark for triton vs plain pytorch coor_descent - 25x faster for forward, 1.5x faster for backwards and memory saved is n_iters times
     - [ ] allow for saving intermediates every number of iterations - trading memory for recompute efficiency during backwards
-    - [ ] add some tests and benchmark for triton vs plain pytorch coor_descent
+    - [ ] maximum block size in triton allowed is 131k, make sure at least quarter of million sequence length can be reached
+    - [ ] fall back on plain coordinate descent for cpu
 
 ## Citations
 

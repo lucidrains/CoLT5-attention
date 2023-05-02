@@ -378,7 +378,8 @@ class CoordinateDescentRouter(nn.Module):
         n_iters = 50,           # 50 iterations in the paper
         fetch_k_ratio = 9 / 8,  # in the paper, they do a bit slightly higher k (times this ratio) for better learning
         eps = 1.,               # the epsilon for coordinate descent. in CoLT5 paper they used 1. apparently
-        num_routing_tokens = 1
+        num_routing_tokens = 1,
+        use_triton = False
     ):
         super().__init__()
         assert fetch_k_ratio >= 1.
@@ -386,6 +387,12 @@ class CoordinateDescentRouter(nn.Module):
 
         self.n_iters = n_iters
         self.fetch_k_ratio = fetch_k_ratio
+
+        self.coor_descent = coor_descent
+
+        if use_triton:
+            from colt5_attention.triton_coor_descent import triton_coor_descent
+            self.coor_descent = triton_coor_descent
 
         self.is_one_routing_token = num_routing_tokens == 1
         self.num_routing_tokens = num_routing_tokens
@@ -426,7 +433,13 @@ class CoordinateDescentRouter(nn.Module):
 
         # coordinate descent
 
-        scores = coor_descent(s, n_iters = self.n_iters, mask = mask, k = k, eps = eps)
+        scores = self.coor_descent(
+            s,
+            n_iters = self.n_iters,
+            mask = mask,
+            k = k,
+            eps = eps
+        )
 
         # get the topk scores and indices from the sparse matrix
 
@@ -468,7 +481,8 @@ class ConditionalRoutedFeedForward(nn.Module):
         heavy_ff_mult = 4,
         router_straight_through = True, # would make sure all normalized scores are 1., still differentiable
         router_type = 'coor_descent',
-        router_kwargs: dict = {}
+        router_kwargs: dict = {},
+        use_triton = False
     ):
         super().__init__()
         assert router_type in ROUTERS.keys()
@@ -478,6 +492,9 @@ class ConditionalRoutedFeedForward(nn.Module):
         self.router_type = router_type
 
         router_klass = ROUTERS.get(router_type)
+
+        if router_type == 'coor_descent' and use_triton:
+            router_kwargs = {**router_kwargs, 'use_triton': True}
 
         self.router = router_klass(
             dim = dim,
@@ -539,7 +556,8 @@ class ConditionalRoutedAttention(nn.Module):
         router_type = 'coor_descent',
         router_kwargs: dict = {},
         multiply_keys_by_score = False,
-        multiply_queries_by_score = False
+        multiply_queries_by_score = False,
+        use_triton = False
     ):
         super().__init__()
         assert router_type in ROUTERS.keys()
@@ -547,6 +565,9 @@ class ConditionalRoutedAttention(nn.Module):
         self.router_type = router_type
 
         router_klass = ROUTERS.get(router_type)
+
+        if router_type == 'coor_descent' and use_triton:
+            router_kwargs = {**router_kwargs, 'use_triton': True}
 
         self.num_heavy_tokens_q = num_heavy_tokens_q
         self.num_heavy_tokens_kv = num_heavy_tokens_kv
@@ -662,7 +683,8 @@ class ConditionalRoutedAutoregressiveAttention(nn.Module):
         router_type = 'coor_descent',
         router_kwargs: dict = {},
         multiply_keys_by_score = False,
-        multiply_queries_by_score = False
+        multiply_queries_by_score = False,
+        use_triton = False
     ):
         super().__init__()
         assert router_type in ROUTERS.keys()
@@ -670,6 +692,9 @@ class ConditionalRoutedAutoregressiveAttention(nn.Module):
         self.router_type = router_type
 
         router_klass = ROUTERS.get(router_type)
+
+        if router_type == 'coor_descent' and use_triton:
+            router_kwargs = {**router_kwargs, 'use_triton': True}
 
         self.num_heavy_tokens_q = num_heavy_tokens_q
         self.num_heavy_tokens_kv = num_heavy_tokens_kv
@@ -820,7 +845,8 @@ class ConditionalRoutedCrossAttention(nn.Module):
         router_type = 'coor_descent',
         router_kwargs: dict = {},
         kv_routing_tokens = 1,
-        multiply_keys_by_score = False
+        multiply_keys_by_score = False,
+        use_triton = False
     ):
         super().__init__()
         assert router_type in ROUTERS.keys()
@@ -828,6 +854,9 @@ class ConditionalRoutedCrossAttention(nn.Module):
         self.router_type = router_type
 
         router_klass = ROUTERS.get(router_type)
+
+        if router_type == 'coor_descent' and use_triton:
+            router_kwargs = {**router_kwargs, 'use_triton': True}
 
         self.num_tokens_q = num_tokens_q
         self.num_tokens_kv = num_tokens_kv
@@ -944,7 +973,8 @@ class ConditionalRoutedTransformerBlock(nn.Module):
         router_type = 'coor_descent',
         router_kwargs: dict = {},
         multiply_keys_by_score = False,
-        multiply_queries_by_score = False
+        multiply_queries_by_score = False,
+        use_triton = False
     ):
         super().__init__()
         self.conditional_ff = ConditionalRoutedFeedForward(
@@ -954,7 +984,8 @@ class ConditionalRoutedTransformerBlock(nn.Module):
             heavy_ff_mult = heavy_ff_mult,
             router_straight_through = router_straight_through,
             router_type = router_type,
-            router_kwargs = router_kwargs
+            router_kwargs = router_kwargs,
+            use_triton = use_triton
         )
 
         self.conditional_attn = ConditionalRoutedAttention(
@@ -971,7 +1002,8 @@ class ConditionalRoutedTransformerBlock(nn.Module):
             router_type = router_type,
             router_kwargs = router_kwargs,
             multiply_keys_by_score = multiply_keys_by_score,
-            multiply_queries_by_score = multiply_queries_by_score
+            multiply_queries_by_score = multiply_queries_by_score,
+            use_triton = use_triton
         )
 
     def forward(

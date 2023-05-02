@@ -235,7 +235,7 @@ class _coor_descent(autograd.Function):
         eps,
         mask
     ):
-        assert x.is_cuda
+        assert x.is_cuda, 'triton coordinate descent must be on cuda'
 
         batch, requires_grad = x.shape[0], x.requires_grad
 
