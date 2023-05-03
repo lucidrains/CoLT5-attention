@@ -8,6 +8,8 @@ from torch import nn, einsum
 from local_attention import LocalMHA
 from einops import rearrange, repeat, pack, unpack
 
+from colt5_attention.attend import Attend
+
 # helper functions
 
 def exists(val):
@@ -77,7 +79,8 @@ class Attention(nn.Module):
         dim,
         dim_head = 64,
         heads = 8,
-        multiply_keys_by_score = False
+        multiply_keys_by_score = False,
+        use_flash = False
     ):
         super().__init__()
         self.heads = heads
@@ -88,6 +91,8 @@ class Attention(nn.Module):
 
         self.norm = RMSNorm(dim)
         self.null_kv = nn.Parameter(torch.randn(2, heads, dim_head))
+
+        self.attend = Attend(use_flash = use_flash)
 
         self.to_q = nn.Linear(dim, dim_hidden, bias = False)
         self.to_kv = nn.Linear(dim, dim_hidden * 2, bias = False)
@@ -167,11 +172,6 @@ class Attention(nn.Module):
         k = torch.cat((nk, k), dim = -2)
         v = torch.cat((nv, v), dim = -2)
 
-        # scale and get similarity
-
-        q = q * self.scale
-        sim = einsum('b h i d, b h j d -> b h i j', q, k)
-
         # masking
 
         if exists(mask):
@@ -182,15 +182,9 @@ class Attention(nn.Module):
 
             mask = F.pad(mask, (1, 0), value = True)
 
-            sim = sim.masked_fill(~mask, -torch.finfo(sim.dtype).max)
-
         # attention
 
-        attn = sim.softmax(dim = -1)
-
-        # aggregate
-
-        out = einsum('b h i j, b h j d -> b h i d', attn, v)
+        out = self.attend(q, k, v)
 
         # merge heads
 
@@ -558,7 +552,8 @@ class ConditionalRoutedAttention(nn.Module):
         multiply_keys_by_score = False,
         multiply_queries_by_score = False,
         use_triton = False,
-        use_null_q_tokens = True
+        use_null_q_tokens = True,
+        use_flash_attn = False
     ):
         super().__init__()
         assert router_type in ROUTERS.keys()
@@ -608,7 +603,8 @@ class ConditionalRoutedAttention(nn.Module):
             dim = dim,
             dim_head = heavy_dim_head,
             heads = heavy_heads,
-            multiply_keys_by_score = multiply_keys_by_score
+            multiply_keys_by_score = multiply_keys_by_score,
+            use_flash = use_flash_attn
         )
 
     def forward(
@@ -695,7 +691,8 @@ class ConditionalRoutedAutoregressiveAttention(nn.Module):
         multiply_keys_by_score = False,
         multiply_queries_by_score = False,
         use_triton = False,
-        use_null_q_tokens = True
+        use_null_q_tokens = True,
+        use_flash_attn = False
     ):
         super().__init__()
         assert router_type in ROUTERS.keys()
@@ -745,7 +742,8 @@ class ConditionalRoutedAutoregressiveAttention(nn.Module):
             dim = dim,
             dim_head = heavy_dim_head,
             heads = heavy_heads,
-            multiply_keys_by_score = multiply_keys_by_score
+            multiply_keys_by_score = multiply_keys_by_score,
+            use_flash = use_flash_attn
         )
 
     def forward(
@@ -877,7 +875,8 @@ class ConditionalRoutedCrossAttention(nn.Module):
         kv_routing_tokens = 1,
         multiply_keys_by_score = False,
         use_triton = False,
-        use_null_q_tokens = True
+        use_null_q_tokens = True,
+        use_flash_attn = False
     ):
         super().__init__()
         assert router_type in ROUTERS.keys()
@@ -913,7 +912,8 @@ class ConditionalRoutedCrossAttention(nn.Module):
             dim = dim,
             dim_head = dim_head,
             heads = heads,
-            multiply_keys_by_score = multiply_keys_by_score
+            multiply_keys_by_score = multiply_keys_by_score,
+            use_flash = use_flash_attn
         )
 
     def forward(
@@ -1014,7 +1014,8 @@ class ConditionalRoutedTransformerBlock(nn.Module):
         multiply_keys_by_score = False,
         multiply_queries_by_score = False,
         use_triton = False,
-        use_null_q_tokens = True
+        use_null_q_tokens = True,
+        use_flash_attn = False
     ):
         super().__init__()
         self.conditional_ff = ConditionalRoutedFeedForward(
@@ -1044,7 +1045,8 @@ class ConditionalRoutedTransformerBlock(nn.Module):
             multiply_keys_by_score = multiply_keys_by_score,
             multiply_queries_by_score = multiply_queries_by_score,
             use_triton = use_triton,
-            use_null_q_tokens = use_null_q_tokens
+            use_null_q_tokens = use_null_q_tokens,
+            use_flash_attn = use_flash_attn
         )
 
     def forward(

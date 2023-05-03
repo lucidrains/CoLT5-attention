@@ -161,3 +161,12 @@ cross_attn_out.shape # (2, 1024, 512) - same as tokens
     year    = {2019}
 }
 ```
+
+```bibtex
+@inproceedings{dao2022flashattention,
+    title     = {Flash{A}ttention: Fast and Memory-Efficient Exact Attention with {IO}-Awareness},
+    author    = {Dao, Tri and Fu, Daniel Y. and Ermon, Stefano and Rudra, Atri and R{\'e}, Christopher},
+    booktitle = {Advances in Neural Information Processing Systems},
+    year      = {2022}
+}
+```

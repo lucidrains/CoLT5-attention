@@ -241,8 +241,7 @@ def coor_descent_kernel_backward(
             da = tl.sum(dsa, axis = 0) + last_da
             da *= -eps
 
-            dsb = da * softmax
-            dsb *= inv_eps
+            dsb = da * softmax * inv_eps
 
             ds += dsb
             db = dsb
