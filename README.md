@@ -138,9 +138,10 @@ cross_attn_out.shape # (2, 1024, 512) - same as tokens
     - [x] add some tests and benchmark for triton vs plain pytorch coor_descent - 10x faster for forward, 4x faster for backwards and memory saved is n_iters times
     - [x] fall back on plain coordinate descent for cpu
     - [x] handle edge case for when a row is completely masked out for triton, or simply enforce it never to be so
+    - [x] fix masking in coordinate descent
     - [ ] allow for saving intermediates every number of iterations - trading memory for recompute efficiency during backwards
-    - [ ] maximum block size in triton allowed is 131k, make sure at least quarter of million sequence length can be reached
-    - [ ] issue with intermittent gradient errors is because of masking - load the key padding mask into triton and mask out during each iteration
+    - [ ] issue with intermittent gradient errors occurs only during masking
+    - [ ] maximum block size in triton allowed is 131k, make sure at least quarter of million sequence length can be reached. to get around this initially, one can fold a million token sequence into ~9 131k and uniformly route. offer uniform routing scheme within router itself
 
 ## Citations
 
