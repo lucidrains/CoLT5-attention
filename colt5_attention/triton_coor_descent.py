@@ -216,7 +216,7 @@ def coor_descent_kernel_backward(
             # update b
 
             sa = s + a
-            b = tl.where(sa >= 0., -sa, 0.)
+            b = tl.where(sa > 0., -sa, 0.)
 
         if is_first:
             o = tl.exp((s + a + b) * inv_eps)
@@ -235,7 +235,7 @@ def coor_descent_kernel_backward(
 
         if n_iters > 0:
 
-            dsa = db * tl.where(sa >= 0, -1., 0.)
+            dsa = db * tl.where(sa > 0, -1., 0.)
             ds += dsa
 
             da = tl.sum(dsa, axis = 0) + last_da
@@ -335,10 +335,11 @@ class _coor_descent(autograd.Function):
         n_iters, eps = ctx.args
         x, k, mask = ctx.saved_tensors
 
+        grad_probs, shape = pack_one(grad_probs, '* n')
+
         if exists(mask):
             grad_probs = grad_probs.masked_fill(~mask, 0.)
 
-        grad_probs, shape = pack_one(grad_probs, '* n')
         n_rows, n_cols = grad_probs.shape
 
         BLOCK_SIZE = triton.next_power_of_2(n_cols)
