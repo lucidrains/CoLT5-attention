@@ -557,7 +557,8 @@ class ConditionalRoutedAttention(nn.Module):
         router_kwargs: dict = {},
         multiply_keys_by_score = False,
         multiply_queries_by_score = False,
-        use_triton = False
+        use_triton = False,
+        use_null_q_tokens = True
     ):
         super().__init__()
         assert router_type in ROUTERS.keys()
@@ -585,6 +586,10 @@ class ConditionalRoutedAttention(nn.Module):
             look_backward = 1,
             look_forward = 1
         )
+
+        self.null_q_token = None
+        if use_null_q_tokens:
+            self.null_q_token = nn.Parameter(torch.randn(dim)) # for the query tokens not selected by the router, give it a learned output embed
 
         self.q_router = router_klass(
             dim = dim,
@@ -656,7 +661,12 @@ class ConditionalRoutedAttention(nn.Module):
 
         # scatter back the output of the heavy branch
 
-        heavy_out = torch.zeros_like(x)
+        if exists(self.null_q_token):
+            heavy_out = rearrange(self.null_q_token, 'd -> 1 1 d')
+            heavy_out = heavy_out.expand_as(x).clone()
+        else:
+            heavy_out = torch.zeros_like(x)
+
         heavy_out = self.q_router.route_back(heavy_out, routed_tokens_out, indices_q)
 
         # sum light and heavy branches
@@ -1003,7 +1013,8 @@ class ConditionalRoutedTransformerBlock(nn.Module):
         router_kwargs: dict = {},
         multiply_keys_by_score = False,
         multiply_queries_by_score = False,
-        use_triton = False
+        use_triton = False,
+        use_null_q_tokens = True
     ):
         super().__init__()
         self.conditional_ff = ConditionalRoutedFeedForward(
@@ -1032,7 +1043,8 @@ class ConditionalRoutedTransformerBlock(nn.Module):
             router_kwargs = router_kwargs,
             multiply_keys_by_score = multiply_keys_by_score,
             multiply_queries_by_score = multiply_queries_by_score,
-            use_triton = use_triton
+            use_triton = use_triton,
+            use_null_q_tokens = use_null_q_tokens
         )
 
     def forward(
