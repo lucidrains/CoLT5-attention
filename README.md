@@ -165,11 +165,9 @@ attn_out = attn(tokens) + tokens # (2, 8192, 512) - output of attention with res
 - [x] allow for multi-headed routing (multiple routing tokens), only for key-values
 - [x] add an autoregressive version of the conditionally routed attention
 - [x] test out the autoregressive version and verify that more routed key / value tokens lead to better results - it works
+- [x] make flash attention compatible
 
-- [ ] for variable sequence lengths, allow for setting k as a function of sequence lengths per sample in batch
 - [ ] create a variant of CoLT5 for high resolution feature maps (image attention) - then try out for diffusion
-- [ ] in the cross attention scenario, support for routing token that first queries the source tokens, before retrieving from memories
-- [ ] make flash attention compatible
 - [ ] fused coordinate descent kernel using triton
     - [x] forwards        
     - [x] backwards
