@@ -8,6 +8,8 @@ Besides their use of coordinate descent from <a href="https://arxiv.org/abs/2211
 
 Update: unsure of how the routing normalized scores for the key-values are used. Did some improvising there, <a href="https://github.com/lucidrains/CoLT5-attention/blob/main/colt5_attention/transformer_block.py#L86">scaling the projected values</a>, but if you think you know the answer, please open an issue
 
+Update 2: seems to work well with the improvisation above
+
 ## Appreciation
 
 - <a href="https://stability.ai/">Stability.ai</a> for the generous sponsorship to work on cutting edge artificial intelligence research
@@ -119,6 +121,42 @@ cross_attn_out = cross_attn(
 )
 
 cross_attn_out.shape # (2, 1024, 512) - same as tokens
+```
+
+Finally, this repository also has an improvised version for autoregressive attention. The way this was achieved was by viewing the sequence in windows. Each window can only attend to windows of key / values into the past. The local attention of the light branch covers the intra-window attention.
+
+The coordinate descent is made viable through a CUDA kernel written in <a href="https://github.com/openai/triton">Triton</a>. Finally, to get autoregressive generation to work well, I had to make sure for the unrouted tokens (for queries), outputs a learned output embedding rather than just zeros.
+
+Currently I am seeing occasional differences between the gradients (as high as 1e-1 for a very small fraction of elements) once the number of iterations exceed 20. However, enwik8 seems to train well and I can see the effects of the routing. Training is surprisingly stable too
+
+ex.
+
+```python
+import torch
+from colt5_attention import ConditionalRoutedAutoregressiveAttention
+
+# mock input, say it is 8192 length
+
+tokens = torch.randn(2, 8192, 512).cuda()
+
+# attention
+
+attn = ConditionalRoutedAutoregressiveAttention(
+    dim = 512,
+    light_dim_head = 64,          # attention head dimension of light branch
+    light_heads = 8,              # number of attention heads for light branch
+    light_window_size = 128,      # local attention receptive field for light
+    heavy_window_size = 128,      # the windowing for the routed heavy attention, by default, will be equal to the light window size. be aware if this is any greater than the light window size, there may be tokens that would be missed by attention
+    heavy_dim_head = 64,          # attention head dimension of heavy branch
+    heavy_heads = 8,              # number of attention heads for heavy branch
+    num_heavy_tokens_q = 32,      # heavy branch receives only 32 out of 128 of the windowed queries (1024 query tokens total)
+    num_heavy_tokens_kv = 1024,   # heavy branch receives only 1024 routed tokens for key-values
+    num_routed_kv = 2,            # one can split the attention heads so that groups of heads attend to different sets of key - values (2 routing tokens in this case)
+    use_triton = True,            # will need to use Triton for this to be viable, otherwise it is too slow and memory efficient with the number of iterations
+    use_flash_attn = True         # use flash attention in heavy branch
+).cuda()
+
+attn_out = attn(tokens) + tokens # (2, 8192, 512) - output of attention with residual (prenorm is included)
 ```
 
 ## Todo

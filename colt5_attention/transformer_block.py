@@ -718,6 +718,7 @@ class ConditionalRoutedAutoregressiveAttention(nn.Module):
             window_size = light_window_size,
             prenorm = True,
             causal = True,
+            exact_windowsize = False,
             use_rotary_pos_emb = False
         )
 
