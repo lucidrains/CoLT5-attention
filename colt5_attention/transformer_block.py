@@ -684,7 +684,8 @@ class ConditionalRoutedAutoregressiveAttention(nn.Module):
         router_kwargs: dict = {},
         multiply_keys_by_score = False,
         multiply_queries_by_score = False,
-        use_triton = False
+        use_triton = False,
+        use_null_q_tokens = False
     ):
         super().__init__()
         assert router_type in ROUTERS.keys()
@@ -712,6 +713,10 @@ class ConditionalRoutedAutoregressiveAttention(nn.Module):
             causal = True,
             use_rotary_pos_emb = False
         )
+
+        self.null_q_token = None
+        if use_null_q_tokens:
+            self.null_q_token = nn.Parameter(torch.randn(dim)) # for the query tokens not selected by the router, give it a learned output embed
 
         self.q_router = router_klass(
             dim = dim,
@@ -823,7 +828,12 @@ class ConditionalRoutedAutoregressiveAttention(nn.Module):
 
             # scatter back the output of the heavy branch
 
-            heavy_out = torch.zeros_like(q)
+            if exists(self.null_q_token):
+                heavy_out = rearrange(self.null_q_token, 'd -> 1 1 d')
+                heavy_out = heavy_out.expand_as(q).clone()
+            else:
+                heavy_out = torch.zeros_like(q)
+
             heavy_out = self.q_router.route_back(heavy_out, routed_tokens_out, indices_q)
         else:
             heavy_out = routed_tokens_out
