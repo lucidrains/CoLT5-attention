@@ -193,169 +193,6 @@ class Attention(nn.Module):
 
 # routing related logic
 
-class DifferentiableTopKRouter(nn.Module):
-    """ differentiable topk using cumulative softmax """
-
-    def __init__(
-        self,
-        dim,
-        straight_through = True,
-        temperature = 1.,
-        num_routing_tokens = 1
-    ):
-        super().__init__()
-        self.is_one_routing_token = num_routing_tokens == 1
-        self.num_routing_tokens = num_routing_tokens
-        self.routing_token = nn.Parameter(torch.randn(num_routing_tokens, dim))
-
-        self.straight_through = straight_through
-        self.temperature = temperature
-
-    def route_back(self, src, routed_tokens, indices):
-        batch_range = create_batch_range(routed_tokens)
-        src[batch_range, indices] = routed_tokens
-        return src
-
-    def forward(
-        self,
-        x,
-        *,
-        num_tokens,
-        mask = None
-    ):
-        num_routes = self.num_routing_tokens
-
-        # eventual normalized score
-
-        scores = einsum('b n d, r d -> b r n', x, self.routing_token)
-
-        # merge routing dimension into batch
-
-        x = repeat(x, 'b ... -> (b r) ...', r = num_routes)
-        scores, ps = pack_one(scores, '* n')
-
-        if exists(mask):
-            mask = repeat(mask, 'b ... -> (b r) ...', r = num_routes)
-
-        scores = scores / self.temperature
-
-        if exists(mask):
-            mask_value = -torch.finfo(scores.dtype).max
-            scores = scores.masked_fill(~mask, mask_value)
-
-        scores, indices = scores.sort(dim = -1)
-
-        scores = scores - scores.amax(dim = -1, keepdim = True).detach()
-
-        exp_scores = scores.exp()
-
-        cum_softmax = exp_scores / exp_scores.cumsum(dim = -1).clamp(min = 1e-6)
-
-        selected_scores, selected_indices = map(lambda t: t[:, -num_tokens:], (cum_softmax, indices))
-
-        if self.straight_through:
-            # this would make sure all normalized scores returned are 1., but still differentiable using straight-through trick
-            selected_scores = selected_scores + (1. - selected_scores).detach()
-
-            if exists(mask):
-                selected_mask = batched_gather(mask, selected_indices)
-                selected_scores = selected_scores.masked_fill(~selected_mask, 0.)
-
-        # split out routing dimension again if need be
-
-        if not self.is_one_routing_token:
-            selected_scores = unpack_one(selected_scores, ps, '* n')
-            selected_indices = unpack_one(selected_indices, ps, '* n')
-
-        return selected_scores, selected_indices
-
-# sinkhorn type routing, with ties to optimal transport
-
-from colt5_attention.sinkhorn import gumbel_sinkhorn, scatter_mean, log
-
-class SinkhornRouter(nn.Module):
-    """ gumbel sinkhorn router """
-    """ ex. https://arxiv.org/abs/1910.09036 """
-
-    def __init__(
-        self,
-        dim,
-        straight_through = True,
-        n_iters = 8,
-        temperature = 0.7,
-        num_routing_tokens = 1
-    ):
-        super().__init__()
-        self.is_one_routing_token = num_routing_tokens == 1
-        self.num_routing_tokens = num_routing_tokens
-        self.routing_token = nn.Parameter(torch.randn(num_routing_tokens, dim))
-
-        self.straight_through = straight_through
-        self.gumbel_sinkhorn_fn = partial(gumbel_sinkhorn, temperature = temperature, n_iters = n_iters)
-
-    def route_back(self, src, routed_tokens, indices):
-        return scatter_mean(src, routed_tokens, indices, dim = 1)
-
-    def forward(
-        self,
-        x,
-        *,
-        num_tokens,
-        mask = None
-    ):
-        n, num_routes = x.shape[-2], self.num_routing_tokens
-        num_tokens = min(n, num_tokens)
-
-        # eventual normalized score
-
-        scores = einsum('b n d, r d -> b r n', x, self.routing_token)
-
-        # merge routing dimension into batch
-
-        x = repeat(x, 'b ... -> (b r) ...', r = num_routes)
-        scores, ps = pack_one(scores, '* n')
-
-        if exists(mask):
-            mask = repeat(mask, 'b ... -> (b r) ...', r = num_routes)
-
-        # calculate scores
-
-        scores = repeat(scores, '... j -> ... i j', i = num_tokens)
-
-        if exists(mask):
-            mask_value = -torch.finfo(scores.dtype).max
-            sinkhorn_mask = rearrange(mask, 'b j -> b 1 j')
-            scores = scores.masked_fill(~sinkhorn_mask, mask_value)
-
-        # sinkhorn
-
-        scores = self.gumbel_sinkhorn_fn(scores)
-
-        # mask again just in case
-
-        if exists(mask):
-            scores = scores.masked_fill(~sinkhorn_mask, mask_value)
-
-        selected_scores, selected_indices = scores.topk(1, dim = -1)
-        selected_scores, selected_indices = map(lambda t: rearrange(t, '... 1 -> ...'), (selected_scores, selected_indices))
-
-        if self.straight_through:
-            # this would make sure all normalized scores returned are 1., but still differentiable using straight-through trick
-            selected_scores = selected_scores + (1. - selected_scores).detach()
-
-            if exists(mask):
-                selected_mask = batched_gather(mask, selected_indices)
-
-                selected_scores = selected_scores.masked_fill(~selected_mask, 0.)
-
-        # split out routing dimension again if need be
-
-        if not self.is_one_routing_token:
-            selected_scores = unpack_one(selected_scores, ps, '* n')
-            selected_indices = unpack_one(selected_indices, ps, '* n')
-
-        return selected_scores, selected_indices
-
 from colt5_attention.coor_descent import coor_descent
 
 class CoordinateDescentRouter(nn.Module):
@@ -490,14 +327,6 @@ class CoordinateDescentRouter(nn.Module):
 
         return selected_scores, selected_indices
 
-# all router types
-
-ROUTERS = dict(
-    cum_softmax = DifferentiableTopKRouter,
-    sinkhorn = SinkhornRouter,
-    coor_descent = CoordinateDescentRouter
-)
-
 # main classes
 
 class ConditionalRoutedFeedForward(nn.Module):
@@ -509,23 +338,16 @@ class ConditionalRoutedFeedForward(nn.Module):
         light_ff_mult = 0.5,
         heavy_ff_mult = 4,
         router_straight_through = True, # would make sure all normalized scores are 1., still differentiable
-        router_type = 'coor_descent',
         router_kwargs: dict = {},
         use_triton = False
     ):
         super().__init__()
-        assert router_type in ROUTERS.keys()
-
         self.num_heavy_tokens = num_heavy_tokens
 
-        self.router_type = router_type
-
-        router_klass = ROUTERS.get(router_type)
-
-        if router_type == 'coor_descent' and use_triton:
+        if use_triton:
             router_kwargs = {**router_kwargs, 'use_triton': True}
 
-        self.router = router_klass(
+        self.router = CoordinateDescentRouter(
             dim = dim,
             straight_through = router_straight_through,
             **router_kwargs
@@ -582,7 +404,6 @@ class ConditionalRoutedAttention(nn.Module):
         heavy_dim_head = 64,
         heavy_heads = 8,
         router_straight_through = True, # would make sure all normalized scores are 1., still differentiable
-        router_type = 'coor_descent',
         router_kwargs: dict = {},
         multiply_keys_by_score = False,
         multiply_queries_by_score = False,
@@ -591,13 +412,8 @@ class ConditionalRoutedAttention(nn.Module):
         use_flash_attn = False
     ):
         super().__init__()
-        assert router_type in ROUTERS.keys()
 
-        self.router_type = router_type
-
-        router_klass = ROUTERS.get(router_type)
-
-        if router_type == 'coor_descent' and use_triton:
+        if use_triton:
             router_kwargs = {**router_kwargs, 'use_triton': True}
 
         self.num_heavy_tokens_q = num_heavy_tokens_q
@@ -621,13 +437,13 @@ class ConditionalRoutedAttention(nn.Module):
         if use_null_q_tokens:
             self.null_q_token = nn.Parameter(torch.randn(dim)) # for the query tokens not selected by the router, give it a learned output embed
 
-        self.q_router = router_klass(
+        self.q_router = CoordinateDescentRouter(
             dim = dim,
             straight_through = router_straight_through,
             **router_kwargs
         )
 
-        self.kv_router = router_klass(
+        self.kv_router = CoordinateDescentRouter(
             dim = dim,
             num_routing_tokens = num_routed_kv,
             straight_through = router_straight_through,
@@ -721,7 +537,6 @@ class ConditionalRoutedAutoregressiveAttention(nn.Module):
         heavy_dim_head = 64,
         heavy_heads = 8,
         router_straight_through = True, # would make sure all normalized scores are 1., still differentiable
-        router_type = 'coor_descent',
         router_kwargs: dict = {},
         multiply_keys_by_score = False,
         multiply_queries_by_score = False,
@@ -730,13 +545,8 @@ class ConditionalRoutedAutoregressiveAttention(nn.Module):
         use_flash_attn = False
     ):
         super().__init__()
-        assert router_type in ROUTERS.keys()
 
-        self.router_type = router_type
-
-        router_klass = ROUTERS.get(router_type)
-
-        if router_type == 'coor_descent' and use_triton:
+        if use_triton:
             router_kwargs = {**router_kwargs, 'use_triton': True}
 
         self.num_heavy_tokens_q = num_heavy_tokens_q
@@ -761,13 +571,13 @@ class ConditionalRoutedAutoregressiveAttention(nn.Module):
         if use_null_q_tokens:
             self.null_q_token = nn.Parameter(torch.randn(dim)) # for the query tokens not selected by the router, give it a learned output embed
 
-        self.q_router = router_klass(
+        self.q_router = CoordinateDescentRouter(
             dim = dim,
             straight_through = router_straight_through,
             **router_kwargs
         )
 
-        self.kv_router = router_klass(
+        self.kv_router = CoordinateDescentRouter(
             dim = dim,
             num_routing_tokens = num_routed_kv,
             straight_through = router_straight_through,
@@ -906,7 +716,6 @@ class ConditionalRoutedCrossAttention(nn.Module):
         dim_head = 64,
         heads = 8,
         router_straight_through = True, # would make sure all normalized scores are 1., still differentiable
-        router_type = 'coor_descent',
         router_kwargs: dict = {},
         kv_routing_tokens = 1,
         multiply_keys_by_score = False,
@@ -916,13 +725,8 @@ class ConditionalRoutedCrossAttention(nn.Module):
         route_block_size = None
     ):
         super().__init__()
-        assert router_type in ROUTERS.keys()
 
-        self.router_type = router_type
-
-        router_klass = ROUTERS.get(router_type)
-
-        if router_type == 'coor_descent' and use_triton:
+        if use_triton:
             router_kwargs = {**router_kwargs, 'use_triton': True}
 
         self.num_tokens_q = num_tokens_q
@@ -932,13 +736,13 @@ class ConditionalRoutedCrossAttention(nn.Module):
         if use_null_q_tokens:
             self.null_q_token = nn.Parameter(torch.randn(dim)) # for the query tokens not selected by the router, give it a learned output embed
 
-        self.q_router = router_klass(
+        self.q_router = CoordinateDescentRouter(
             dim = dim,
             straight_through = router_straight_through,
             **router_kwargs
         )
 
-        self.kv_router = router_klass(
+        self.kv_router = CoordinateDescentRouter(
             dim = dim,
             straight_through = router_straight_through,
             num_routing_tokens = kv_routing_tokens,
@@ -1047,7 +851,6 @@ class ConditionalRoutedTransformerBlock(nn.Module):
         light_ff_mult = 0.5,
         heavy_ff_mult = 4,
         router_straight_through = True,
-        router_type = 'coor_descent',
         router_kwargs: dict = {},
         multiply_keys_by_score = False,
         multiply_queries_by_score = False,
@@ -1062,7 +865,6 @@ class ConditionalRoutedTransformerBlock(nn.Module):
             light_ff_mult = light_ff_mult,
             heavy_ff_mult = heavy_ff_mult,
             router_straight_through = router_straight_through,
-            router_type = router_type,
             router_kwargs = router_kwargs,
             use_triton = use_triton
         )
@@ -1078,7 +880,6 @@ class ConditionalRoutedTransformerBlock(nn.Module):
             num_heavy_tokens_kv = num_heavy_attn_tokens_kv,
             num_routed_kv = num_routed_kv,
             router_straight_through = router_straight_through,
-            router_type = router_type,
             router_kwargs = router_kwargs,
             multiply_keys_by_score = multiply_keys_by_score,
             multiply_queries_by_score = multiply_queries_by_score,

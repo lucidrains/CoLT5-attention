@@ -4,7 +4,7 @@
 
 Implementation of the conditionally routed efficient attention in the proposed <a href="https://arxiv.org/abs/2303.09752">CoLT5</a> architecture, in Pytorch.
 
-Besides their use of coordinate descent from <a href="https://arxiv.org/abs/2211.01267">this paper</a> (main algorithm originally from <a href="https://arxiv.org/abs/1502.04759">Wright et al</a>), will also add two other approaches, one based on cumulative softmax, the other gumbel sinkhorn (optimal transport).
+They used coordinate descent from <a href="https://arxiv.org/abs/2211.01267">this paper</a> (main algorithm originally from <a href="https://arxiv.org/abs/1502.04759">Wright et al</a>) to route a subset of tokens for 'heavier' branches of the feedforward and attention blocks.
 
 Update: unsure of how the routing normalized scores for the key-values are used. Did some improvising there, <a href="https://github.com/lucidrains/CoLT5-attention/blob/main/colt5_attention/transformer_block.py#L86">scaling the projected values</a>, but if you think you know the answer, please open an issue
 
@@ -81,8 +81,7 @@ block = ConditionalRoutedTransformerBlock(
     heavy_ff_mult = 4,
     num_heavy_ff_tokens = 1024,
     num_heavy_attn_tokens_q = 1024,
-    num_heavy_attn_tokens_kv = 1024,
-    router_type = 'coor_descent'  # you have your choice of coordinate descent, as in paper - or 'sinkhorn' or 'cum_softmax'
+    num_heavy_attn_tokens_kv = 1024
 )
 
 block_out = block(tokens, mask = mask) # (2, 32768, 512)
@@ -179,8 +178,8 @@ attn_out = attn(tokens) + tokens # (2, 8192, 512) - output of attention with res
     - [x] fix masking in coordinate descent
     - [x] simplified some logic within the triton kernel and the problem went away. probably some tiny quirk with the compiler
     - [x] maximum block size in triton allowed is 131k, make sure at least quarter of million sequence length can be reached. to get around this initially, one can fold a million token sequence into ~9 131k and uniformly route. offer uniform routing scheme within router itself
+    - [x] remove sinkhorn and cumulative softmax approaches and cleanup; neither can work as well as coordinate descent
     - [ ] allow for saving intermediates every number of iterations - trading memory for recompute efficiency during backwards
-    - [ ] remove sinkhorn and cumulative softmax approaches and cleanup; neither can work as well as coordinate descent
 
 ## Citations
 

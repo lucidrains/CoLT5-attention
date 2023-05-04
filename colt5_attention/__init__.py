@@ -4,8 +4,6 @@ from colt5_attention.transformer_block import (
     ConditionalRoutedAutoregressiveAttention,
     ConditionalRoutedCrossAttention,
     ConditionalRoutedTransformerBlock,
-    DifferentiableTopKRouter,
-    SinkhornRouter,
     CoordinateDescentRouter
 )
 
