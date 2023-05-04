@@ -175,8 +175,8 @@ attn_out = attn(tokens) + tokens # (2, 8192, 512) - output of attention with res
     - [x] fall back on plain coordinate descent for cpu
     - [x] handle edge case for when a row is completely masked out for triton, or simply enforce it never to be so
     - [x] fix masking in coordinate descent
+    - [x] simplified some logic within the triton kernel and the problem went away. probably some tiny quirk with the compiler
     - [ ] allow for saving intermediates every number of iterations - trading memory for recompute efficiency during backwards
-    - [ ] issue with intermittent gradient errors occurs only during masking
     - [ ] maximum block size in triton allowed is 131k, make sure at least quarter of million sequence length can be reached. to get around this initially, one can fold a million token sequence into ~9 131k and uniformly route. offer uniform routing scheme within router itself
 
 ## Citations

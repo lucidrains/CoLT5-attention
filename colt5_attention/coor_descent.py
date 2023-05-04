@@ -17,6 +17,8 @@ def coor_descent(
     eps = 1e-1,
     mask = None
 ):
+    assert n_iters > 0
+
     mask_value = -torch.finfo(s.dtype).max
 
     if not isinstance(k, torch.Tensor):

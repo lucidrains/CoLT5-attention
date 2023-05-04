@@ -128,13 +128,13 @@ def coor_descent_kernel_backward(
     dk_ptr,
     input_ptr,
     mask_ptr,
-    grad_ptr,
+    ds_ptr,
     k_ptr,
     output_row_stride,
     dk_row_stride,
     input_row_stride,
     mask_row_stride,
-    grad_row_stride,
+    ds_row_stride,
     k_row_stride,
     n_iters,
     eps,
@@ -170,12 +170,12 @@ def coor_descent_kernel_backward(
     k = tl.load(k_ptr)
     constant = tl.log(k) * eps
 
-    # load grads
+    # load initial ds
 
-    grad_row_start_ptr = grad_ptr + row_idx * grad_row_stride
-    grad_ptrs = grad_row_start_ptr + col_offsets
+    ds_row_start_ptr = ds_ptr + row_idx * ds_row_stride
+    ds_ptrs = ds_row_start_ptr + col_offsets
 
-    grad_row = tl.load(grad_ptrs, mask = mask, other = 0.)
+    ds = tl.load(ds_ptrs, mask = mask, other = 0.)
 
     # initial a and b
 
@@ -184,21 +184,20 @@ def coor_descent_kernel_backward(
 
     # output, which is dx (ds) and dk
 
-    ds = s * 0.
     dk = 0.
 
     # temp variables
 
-    db = s * 0
     last_da = k * 0
 
     inv_eps = 1. / eps
 
+    db = ds
+    last_da = tl.sum(ds, axis = 0)
+
     # backwards
 
     for ind in range(n_iters):
-        is_first = ind == 0
-
         a = init_a
         b = init_b
 
@@ -228,37 +227,22 @@ def coor_descent_kernel_backward(
             sa = s + a
             b = tl.where(sa > 0., -sa, 0.)
 
-        if is_first:
-            o = tl.exp((s + a + b) * inv_eps)
-
-            o = tl.where(mask, o, 0.)
-
-            ds = grad_row * o
-            ds *= inv_eps
-
-            ds = tl.where(mask, ds, 0.)
-
-            last_da = tl.sum(ds, axis = 0)
-            db = ds
-
         # go backwards
 
-        if n_iters > 0:
+        dsa = db * tl.where(sa > 0, -1., 0.)
 
-            dsa = db * tl.where(sa > 0, -1., 0.)
+        ds += dsa
 
-            ds += dsa
+        da = tl.sum(dsa, axis = 0) + last_da
 
-            da = tl.sum(dsa, axis = 0) + last_da
+        dk += da
 
-            dk += da
+        dsb = da * -softmax
 
-            dsb = da * -softmax
+        ds += dsb
+        db = dsb
 
-            ds += dsb
-            db = dsb
-
-            last_da = 0.
+        last_da = 0.
 
     ds += -db
 
@@ -290,6 +274,7 @@ class _coor_descent(autograd.Function):
         eps,
         mask
     ):
+        assert n_iters > 0
         assert x.is_cuda, 'triton coordinate descent must be on cuda'
 
         batch, requires_grad = x.shape[0], x.requires_grad
@@ -335,7 +320,7 @@ class _coor_descent(autograd.Function):
 
         if requires_grad:
             ctx.args = (n_iters, eps)
-            ctx.save_for_backward(x, k, mask)
+            ctx.save_for_backward(x, y, k, mask)
 
         y = unpack_one(y, shape, '* n')
 
@@ -352,12 +337,14 @@ class _coor_descent(autograd.Function):
         batch = grad_probs.shape[0]
 
         n_iters, eps = ctx.args
-        x, k, mask = ctx.saved_tensors
+        x, y, k, mask = ctx.saved_tensors
 
         grad_probs, shape = pack_one(grad_probs, '* n')
 
         if exists(mask):
             grad_probs = grad_probs.masked_fill(~mask, 0.)
+
+        ds = grad_probs * y / eps
 
         n_rows, n_cols = grad_probs.shape
 
@@ -374,13 +361,13 @@ class _coor_descent(autograd.Function):
             dk,
             x,
             mask_int,
-            grad_probs,
+            ds,
             k,
             dx.stride(0),
             dk.stride(0),
             x.stride(0),
             mask_int.stride(0),
-            grad_probs.stride(0),
+            ds.stride(0),
             k.stride(0),
             n_iters,
             eps,
