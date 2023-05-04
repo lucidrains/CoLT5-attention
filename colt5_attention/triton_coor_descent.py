@@ -125,11 +125,13 @@ def coor_descent_kernel_forward(
 @triton.jit
 def coor_descent_kernel_backward(
     output_ptr,
+    dk_ptr,
     input_ptr,
     mask_ptr,
     grad_ptr,
     k_ptr,
     output_row_stride,
+    dk_row_stride,
     input_row_stride,
     mask_row_stride,
     grad_row_stride,
@@ -177,10 +179,17 @@ def coor_descent_kernel_backward(
 
     # recompute
 
+
     init_a = k * 0
     init_b = -s
 
-    ds = s * 0
+    # output, which is dx (ds) and dk
+
+    ds = s * 0.
+    dk = 0.
+
+    # temp variables
+
     db = s * 0
     last_da = k * 0
 
@@ -196,6 +205,8 @@ def coor_descent_kernel_backward(
 
         sa = s * 0
         softmax = s * 0
+
+        # recompute
 
         for _ in range(n_iters - ind):
 
@@ -236,9 +247,13 @@ def coor_descent_kernel_backward(
         if n_iters > 0:
 
             dsa = db * tl.where(sa > 0, -1., 0.)
+
             ds += dsa
 
             da = tl.sum(dsa, axis = 0) + last_da
+
+            dk += da
+
             da *= -eps
 
             dsb = da * softmax * inv_eps
@@ -249,6 +264,13 @@ def coor_descent_kernel_backward(
             last_da = 0.
 
     ds += -db
+
+    dk *= eps / k
+
+    # store dk
+
+    dk_ptr = dk_ptr + row_idx * dk_row_stride
+    tl.store(dk_ptr, dk)
 
     # store output
 
@@ -346,16 +368,19 @@ class _coor_descent(autograd.Function):
         num_warps = calc_num_warps(BLOCK_SIZE)
 
         dx = torch.empty_like(grad_probs)
+        dk = torch.empty_like(k)
 
         mask_int = mask.int()
 
         coor_descent_kernel_backward[(n_rows,)](
             dx,
+            dk,
             x,
             mask_int,
             grad_probs,
             k,
             dx.stride(0),
+            dk.stride(0),
             x.stride(0),
             mask_int.stride(0),
             grad_probs.stride(0),
@@ -369,7 +394,10 @@ class _coor_descent(autograd.Function):
 
         dx = unpack_one(dx, shape, '* n')
 
-        return dx, None, None, None, None
+        if not k.requires_grad:
+            dk = None
+
+        return dx, None, dk, None, None
 
 def triton_coor_descent(
     s,
