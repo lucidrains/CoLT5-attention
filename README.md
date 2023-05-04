@@ -96,11 +96,11 @@ from colt5_attention import ConditionalRoutedCrossAttention
 
 # mock input, let us say it is a transformer of 1024 length attending to 1 million context past memories
 
-tokens = torch.randn(2, 1024, 512).cuda()
-tokens_mask = torch.ones(2, 1024).bool().cuda()
+tokens = torch.randn(1, 1024, 512).cuda()
+tokens_mask = torch.ones(1, 1024).bool().cuda()
 
-memories = torch.randn(2, int(1e6), 512).cuda()
-memories_mask = torch.ones(2, int(1e6)).bool().cuda()
+memories = torch.randn(1, 1_048_576, 512).cuda()
+memories_mask = torch.ones(1, 1_048_576).bool().cuda()
 
 # conditionally routed cross attention
 
@@ -111,6 +111,8 @@ cross_attn = ConditionalRoutedCrossAttention(
     num_tokens_q = 512,         # only 512 routed from 1024
     num_tokens_kv = 1024,       # only 1024 routed from 1 million
     kv_routing_tokens = 2,      # say you want 2 routing tokens to route different sets of key / values to the queries. 4 attention heads will be allocated to each routed set in this example (8 / 2)
+    use_triton = True,          # use cuda kernel
+    route_block_size = 131072   # route in blocks of 131072
 ).cuda()
 
 cross_attn_out = cross_attn(
@@ -120,7 +122,7 @@ cross_attn_out = cross_attn(
     context_mask = memories_mask
 )
 
-cross_attn_out.shape # (2, 1024, 512) - same as tokens
+cross_attn_out.shape # (1, 1024, 512) - same as tokens
 ```
 
 Finally, this repository also has an improvised version for autoregressive attention. The way this was achieved was by viewing the sequence in windows. Each window can only attend to windows of key / values into the past. The local attention of the light branch covers the intra-window attention.
@@ -176,8 +178,9 @@ attn_out = attn(tokens) + tokens # (2, 8192, 512) - output of attention with res
     - [x] handle edge case for when a row is completely masked out for triton, or simply enforce it never to be so
     - [x] fix masking in coordinate descent
     - [x] simplified some logic within the triton kernel and the problem went away. probably some tiny quirk with the compiler
+    - [x] maximum block size in triton allowed is 131k, make sure at least quarter of million sequence length can be reached. to get around this initially, one can fold a million token sequence into ~9 131k and uniformly route. offer uniform routing scheme within router itself
     - [ ] allow for saving intermediates every number of iterations - trading memory for recompute efficiency during backwards
-    - [ ] maximum block size in triton allowed is 131k, make sure at least quarter of million sequence length can be reached. to get around this initially, one can fold a million token sequence into ~9 131k and uniformly route. offer uniform routing scheme within router itself
+    - [ ] remove sinkhorn and cumulative softmax approaches and cleanup; neither can work as well as coordinate descent
 
 ## Citations
 

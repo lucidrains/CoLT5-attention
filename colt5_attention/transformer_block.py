@@ -373,7 +373,8 @@ class CoordinateDescentRouter(nn.Module):
         fetch_k_ratio = 9 / 8,  # in the paper, they do a bit slightly higher k (times this ratio) for better learning
         eps = 1.,               # the epsilon for coordinate descent. in CoLT5 paper they used 1. apparently
         num_routing_tokens = 1,
-        use_triton = False
+        use_triton = False,
+        route_block_size = None
     ):
         super().__init__()
         assert fetch_k_ratio >= 1.
@@ -390,6 +391,9 @@ class CoordinateDescentRouter(nn.Module):
 
         self.is_one_routing_token = num_routing_tokens == 1
         self.num_routing_tokens = num_routing_tokens
+
+        self.route_block_size = route_block_size
+
         self.routing_token = nn.Parameter(torch.randn(num_routing_tokens, dim))
         self.straight_through = straight_through
 
@@ -405,7 +409,28 @@ class CoordinateDescentRouter(nn.Module):
         num_tokens,
         mask = None
     ):
-        n, device, eps, num_routes = x.shape[-2], x.device, self.eps, self.num_routing_tokens
+        n, device, eps, num_routes, route_block_size = x.shape[-2], x.device, self.eps, self.num_routing_tokens, self.route_block_size
+
+        # whether to route even amounts from blocks of the sequence
+
+        if exists(route_block_size):
+            num_blocks = n // route_block_size
+            prev_seq_mult = num_blocks * route_block_size
+
+            # just curtail to last multiple of route block size
+
+            x = x[:, :prev_seq_mult]
+
+            # group sequence into blocks to route
+
+            x = rearrange(x, 'b (n w) d -> (b n) w d', w = route_block_size)
+
+            if exists(mask):
+                mask = mask[:, :prev_seq_mult]
+                mask = rearrange(mask, 'b (n w) -> (b n) w', w = route_block_size)
+
+            n = route_block_size
+            num_tokens = math.ceil(num_tokens / num_blocks)
 
         # s stands for eventual normalized score
 
@@ -452,6 +477,16 @@ class CoordinateDescentRouter(nn.Module):
         if not self.is_one_routing_token:
             selected_scores = unpack_one(selected_scores, ps, '* n')
             selected_indices = unpack_one(selected_indices, ps, '* n')
+
+        # undo the windowing, if one were routing uniformly in blocks
+
+        if exists(route_block_size):
+            selected_scores = rearrange(selected_scores, '(b n) ... w -> b ... (n w)', n = num_blocks)
+            selected_indices = rearrange(selected_indices, '(b n) ... w -> b ... n w', n = num_blocks)
+
+            indices_offset = torch.arange(num_blocks, device = device) * route_block_size
+            selected_indices = selected_indices + rearrange(indices_offset, 'n -> n 1')
+            selected_indices = rearrange(selected_indices, 'b ... n w -> b ... (n w)')
 
         return selected_scores, selected_indices
 
@@ -877,7 +912,8 @@ class ConditionalRoutedCrossAttention(nn.Module):
         multiply_keys_by_score = False,
         use_triton = False,
         use_null_q_tokens = True,
-        use_flash_attn = False
+        use_flash_attn = False,
+        route_block_size = None
     ):
         super().__init__()
         assert router_type in ROUTERS.keys()
@@ -906,6 +942,7 @@ class ConditionalRoutedCrossAttention(nn.Module):
             dim = dim,
             straight_through = router_straight_through,
             num_routing_tokens = kv_routing_tokens,
+            route_block_size = route_block_size,
             **router_kwargs
         )
 

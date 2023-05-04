@@ -298,6 +298,9 @@ class _coor_descent(autograd.Function):
         k = k.to(x)
 
         BLOCK_SIZE = triton.next_power_of_2(n_cols)
+
+        assert BLOCK_SIZE <= 131072, 'the maximum block size allowed is 131072 for triton cuda kernel - set the `route_block_size` for the CoordinateDescentRouter to be this value or less in order to uniformly route to get around this limitation'
+
         num_warps = calc_num_warps(BLOCK_SIZE)
 
         y = torch.empty_like(x)
