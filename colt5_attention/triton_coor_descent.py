@@ -43,11 +43,13 @@ def unpack_one(t, ps, pattern):
 
 @triton.jit
 def coor_descent_kernel_forward(
-    output_ptr,
+    a_ptr,
+    b_ptr,
     input_ptr,
     mask_ptr,
     k_ptr,
-    output_row_stride,
+    a_row_stride,
+    b_row_stride,
     input_row_stride,
     mask_row_stride,
     k_row_stride,
@@ -57,13 +59,7 @@ def coor_descent_kernel_forward(
     BLOCK_SIZE: tl.constexpr
 ):
     row_idx = tl.program_id(0)
-
-    row_start_ptr = input_ptr + row_idx * input_row_stride
-    k_ptr = k_ptr + row_idx * k_row_stride
-
     col_offsets = tl.arange(0, BLOCK_SIZE)
-    input_ptrs = row_start_ptr + col_offsets
-
     col_mask = col_offsets < n_cols
 
     # load mask as ints (for some reason as boolean breaks triton)
@@ -74,23 +70,31 @@ def coor_descent_kernel_forward(
     mask_ints = tl.load(mask_ptrs, mask = col_mask, other = 0)
     mask = mask_ints == 1
 
+    # load a and b
+
+    a_ptr = a_ptr + row_idx * a_row_stride
+    a = tl.load(a_ptr)
+
+    b_start_ptr = b_ptr + row_idx * b_row_stride
+    b_ptrs = b_start_ptr + col_offsets
+    b = tl.load(b_ptrs, mask = col_mask, other = 0)
+
     # load the scores s
 
+    row_start_ptr = input_ptr + row_idx * input_row_stride
+    input_ptrs = row_start_ptr + col_offsets
     s = tl.load(input_ptrs, mask = mask, other = -float('inf'))
 
     # load k - controls the sparsity of output
 
+    k_ptr = k_ptr + row_idx * k_row_stride
     k = tl.load(k_ptr)
+
+    # initialize some constants
 
     constant = tl.log(k) * eps
 
     inv_eps = 1. / eps
-
-    # initialize a and b for coordinate descent
-
-    a = k * 0 # init a to 0, triton needs to know shape and type outside loop
-
-    b = -s
 
     for _ in range(n_iters):        
 
@@ -112,29 +116,30 @@ def coor_descent_kernel_forward(
         b = s + a
         b = tl.where(b >= 0., -b, 0.)
 
-    s = tl.exp((s + a + b) * inv_eps)
+    # store a and b
 
-    output_row_start_ptr = output_ptr + row_idx * output_row_stride
-    output_ptrs = output_row_start_ptr + col_offsets
-
-    s = tl.where(mask, s, 0.)
-    tl.store(output_ptrs, s)
+    tl.store(a_ptr, a)
+    tl.store(b_ptrs, b, mask = col_mask)
 
 # backwards
 
 @triton.jit
 def coor_descent_kernel_backward(
-    output_ptr,
     dk_ptr,
     input_ptr,
+    a_ptr,
+    b_ptr,
     mask_ptr,
     ds_ptr,
+    db_ptr,
     k_ptr,
-    output_row_stride,
     dk_row_stride,
     input_row_stride,
+    a_row_stride,
+    b_row_stride,
     mask_row_stride,
     ds_row_stride,
+    db_row_stride,
     k_row_stride,
     n_iters,
     eps,
@@ -155,6 +160,15 @@ def coor_descent_kernel_backward(
 
     mask_ints = tl.load(mask_ptrs, mask = col_mask, other = 0)
     mask = mask_ints == 1
+
+     # load a and b
+
+    a_ptr = a_ptr + row_idx * a_row_stride
+    init_a = tl.load(a_ptr)
+
+    b_start_ptr = b_ptr + row_idx * b_row_stride
+    b_ptrs = b_start_ptr + col_offsets
+    init_b = tl.load(b_ptrs, mask = mask, other = 0)
 
     # load input
 
@@ -177,22 +191,21 @@ def coor_descent_kernel_backward(
 
     ds = tl.load(ds_ptrs, mask = mask, other = 0.)
 
-    # initial a and b
+    # load initial db
 
-    init_a = k * 0
-    init_b = -s
+    db_row_start_ptr = db_ptr + row_idx * db_row_stride
+    db_ptrs = db_row_start_ptr + col_offsets
 
-    # output, which is dx (ds) and dk
+    db = tl.load(db_ptrs, mask = mask, other = 0.)
 
-    dk = 0.
+    # load initial dk
+
+    dk_ptr = dk_ptr + row_idx * dk_row_stride
+    dk = tl.load(dk_ptr)
 
     # temp variables
 
-    last_da = k * 0
-
     inv_eps = 1. / eps
-
-    db = ds
     last_da = tl.sum(ds, axis = 0)
 
     # backwards
@@ -244,22 +257,19 @@ def coor_descent_kernel_backward(
 
         last_da = 0.
 
-    ds += -db
-
-    dk *= eps / k
-
     # store dk
 
-    dk_ptr = dk_ptr + row_idx * dk_row_stride
     tl.store(dk_ptr, dk)
 
-    # store output
-
-    output_row_start_ptr = output_ptr + row_idx * output_row_stride
-    output_ptrs = output_row_start_ptr + col_offsets
+    # store ds
 
     ds = tl.where(mask, ds, 0.)
-    tl.store(output_ptrs, ds)
+    tl.store(ds_ptrs, ds)
+
+    # store db
+
+    db = tl.where(mask, db, 0.)
+    tl.store(db_ptrs, db)
 
 # function forwards and backwards
 
@@ -303,14 +313,17 @@ class _coor_descent(autograd.Function):
 
         num_warps = calc_num_warps(BLOCK_SIZE)
 
-        y = torch.empty_like(x)
+        a = torch.zeros_like(k)
+        b = -x
 
         coor_descent_kernel_forward[(n_rows,)](
-            y,
+            a,
+            b,
             x,
             mask_ints,
             k,
-            y.stride(0),
+            a.stride(0),
+            b.stride(0),
             x.stride(0),
             mask_ints.stride(0),
             k.stride(0),
@@ -320,6 +333,8 @@ class _coor_descent(autograd.Function):
             num_warps = num_warps,
             BLOCK_SIZE = BLOCK_SIZE,
         )
+
+        y = torch.exp((a[..., None] + b + x) / eps)
 
         if requires_grad:
             ctx.args = (n_iters, eps)
@@ -348,29 +363,36 @@ class _coor_descent(autograd.Function):
             grad_probs = grad_probs.masked_fill(~mask, 0.)
 
         ds = grad_probs * y / eps
+        db = ds.clone()
 
         n_rows, n_cols = grad_probs.shape
 
         BLOCK_SIZE = triton.next_power_of_2(n_cols)
         num_warps = calc_num_warps(BLOCK_SIZE)
 
-        dx = torch.empty_like(grad_probs)
-        dk = torch.empty_like(k)
+        dk = torch.zeros_like(k)
 
         mask_int = mask.int()
 
+        a = torch.zeros_like(k)
+        b = -x
+
         coor_descent_kernel_backward[(n_rows,)](
-            dx,
             dk,
             x,
+            a,
+            b,
             mask_int,
             ds,
+            db,
             k,
-            dx.stride(0),
             dk.stride(0),
             x.stride(0),
+            a.stride(0),
+            b.stride(0),
             mask_int.stride(0),
             ds.stride(0),
+            db.stride(0),
             k.stride(0),
             n_iters,
             eps,
@@ -379,12 +401,15 @@ class _coor_descent(autograd.Function):
             BLOCK_SIZE = BLOCK_SIZE
         )
 
-        dx = unpack_one(dx, shape, '* n')
+        ds += -db
+        ds = unpack_one(ds, shape, '* n')
 
         if not k.requires_grad:
             dk = None
+        else:
+            dk *= eps / k
 
-        return dx, None, dk, None, None
+        return ds, None, dk, None, None
 
 def triton_coor_descent(
     s,
