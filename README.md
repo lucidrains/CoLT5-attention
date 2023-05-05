@@ -170,7 +170,7 @@ attn_out = attn(tokens) + tokens # (2, 8192, 512) - output of attention with res
 - [x] fused coordinate descent kernel using triton
     - [x] forwards        
     - [x] backwards
-    - [x] benchmark triton vs plain pytorch coor_descent - 50 iterations with 4 segments - 17x faster for forward (7.23 vs 0.41), 7.2x faster for backwards (5.77 vs 0.80)
+    - [x] benchmark triton vs plain pytorch coor_descent - 50 iterations with 4 segments - 18.5x faster for forward (7.23 vs 0.39), 7.2x faster for backwards (5.77 vs 0.80)
     - [x] fall back on plain coordinate descent for cpu
     - [x] handle edge case for when a row is completely masked out for triton, or simply enforce it never to be so
     - [x] fix masking in coordinate descent
@@ -178,7 +178,7 @@ attn_out = attn(tokens) + tokens # (2, 8192, 512) - output of attention with res
     - [x] maximum block size in triton allowed is 131k, make sure at least quarter of million sequence length can be reached. to get around this initially, one can fold a million token sequence into ~9 131k and uniformly route. offer uniform routing scheme within router itself
     - [x] remove sinkhorn and cumulative softmax approaches and cleanup; neither can work as well as coordinate descent
     - [x] allow for saving intermediates every number of iterations - trading memory for recompute efficiency during backwards
-    - [ ] in-place write to checkpointed a and b tensor for potentially savings on forward when recompute segments is high
+    - [x] in-place write to checkpointed a and b tensor for potentially savings on forward when recompute segments is high
 
 - [ ] create a variant of CoLT5 for high resolution feature maps (image attention) - then try out for diffusion
 

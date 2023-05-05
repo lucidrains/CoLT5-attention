@@ -61,11 +61,11 @@ def coor_descent_kernel_forward(
     input_ptr,
     mask_ptr,
     k_ptr,
-    a_row_stride,
+    a_iter_stride,
     b_row_stride,
+    b_iter_stride,
     input_row_stride,
     mask_row_stride,
-    k_row_stride,
     n_iters,
     eps,
     n_cols,
@@ -85,7 +85,7 @@ def coor_descent_kernel_forward(
 
     # load a and b
 
-    a_ptr = a_ptr + row_idx * a_row_stride
+    a_ptr = a_ptr + row_idx
     a = tl.load(a_ptr)
 
     b_start_ptr = b_ptr + row_idx * b_row_stride
@@ -100,7 +100,7 @@ def coor_descent_kernel_forward(
 
     # load k - controls the sparsity of output
 
-    k_ptr = k_ptr + row_idx * k_row_stride
+    k_ptr = k_ptr + row_idx
     k = tl.load(k_ptr)
 
     # initialize some constants
@@ -129,10 +129,13 @@ def coor_descent_kernel_forward(
         b = s + a
         b = tl.where(b >= 0., -b, 0.)
 
-    # store a and b
+    # store a and b for next round
 
-    tl.store(a_ptr, a)
-    tl.store(b_ptrs, b, mask = col_mask)
+    next_a_ptrs = a_ptr + a_iter_stride
+    next_b_ptrs = b_ptrs + b_iter_stride
+
+    tl.store(next_a_ptrs, a)
+    tl.store(next_b_ptrs, b, mask = col_mask)
 
 # backwards
 
@@ -146,14 +149,11 @@ def coor_descent_kernel_backward(
     ds_ptr,
     db_ptr,
     k_ptr,
-    dk_row_stride,
     input_row_stride,
-    a_row_stride,
     b_row_stride,
     mask_row_stride,
     ds_row_stride,
     db_row_stride,
-    k_row_stride,
     n_iters,
     eps,
     n_cols,
@@ -176,7 +176,7 @@ def coor_descent_kernel_backward(
 
      # load a and b
 
-    a_ptr = a_ptr + row_idx * a_row_stride
+    a_ptr = a_ptr + row_idx
     init_a = tl.load(a_ptr)
 
     b_start_ptr = b_ptr + row_idx * b_row_stride
@@ -192,7 +192,7 @@ def coor_descent_kernel_backward(
 
     # load k - controls the sparsity of output
 
-    k_ptr = k_ptr + row_idx * k_row_stride
+    k_ptr = k_ptr + row_idx
 
     k = tl.load(k_ptr)
     constant = tl.log(k) * eps
@@ -213,7 +213,7 @@ def coor_descent_kernel_backward(
 
     # load initial dk
 
-    dk_ptr = dk_ptr + row_idx * dk_row_stride
+    dk_ptr = dk_ptr + row_idx
     dk = tl.load(dk_ptr)
 
     # temp variables
@@ -301,7 +301,7 @@ class _coor_descent(autograd.Function):
         assert n_iters > 0
         assert x.is_cuda, 'triton coordinate descent must be on cuda'
 
-        batch, requires_grad, device = x.shape[0], x.requires_grad, x.device
+        batch, requires_grad, device, dtype = x.shape[0], x.requires_grad, x.device, x.dtype
 
         if not exists(mask):
             mask = torch.ones_like(x, dtype = torch.bool, device = x.device)
@@ -327,31 +327,26 @@ class _coor_descent(autograd.Function):
 
         num_warps = calc_num_warps(BLOCK_SIZE)
 
-        a = torch.zeros_like(k)
-        b = -x
+        checkpointed_a = torch.empty((checkpoint_segments + 1, n_rows), device = device, dtype = dtype)
+        checkpointed_b = torch.empty((checkpoint_segments + 1, n_rows, n_cols), device = device, dtype = dtype)
 
-        checkpoint_in_segments = checkpoint_segments > 1
-        checkpointed_a = torch.empty((checkpoint_segments - 1, n_rows), device = device, dtype = a.dtype)
-        checkpointed_b = torch.empty((checkpoint_segments - 1, n_rows, n_cols), device = device, dtype = b.dtype)
+        checkpointed_a[0] = torch.zeros_like(k)
+        checkpointed_b[0] = -x
 
         for ind, segment_iters in enumerate(num_to_groups(n_iters, checkpoint_segments)):
-            is_first = 0
-
-            if not is_first and checkpoint_in_segments:
-                checkpointed_a[ind - 1] = a
-                checkpointed_b[ind - 1] = b
+            is_last = ind == (checkpoint_segments - 1)
 
             coor_descent_kernel_forward[(n_rows,)](
-                a,
-                b,
+                checkpointed_a[ind],
+                checkpointed_b[ind],
                 x,
                 mask_ints,
                 k,
-                a.stride(0),
-                b.stride(0),
+                checkpointed_a.stride(0),
+                n_cols,
+                checkpointed_b.stride(0),
                 x.stride(0),
                 mask_ints.stride(0),
-                k.stride(0),
                 segment_iters,
                 eps,
                 n_cols,
@@ -359,9 +354,13 @@ class _coor_descent(autograd.Function):
                 BLOCK_SIZE = BLOCK_SIZE,
             )
 
-        y = torch.exp((a[..., None] + b + x) / eps)
+        last_a, last_b = map(lambda t: t[-1], (checkpointed_a, checkpointed_b))
+        y = torch.exp((last_a[..., None] + last_b + x) / eps)
 
         if requires_grad:
+            checkpointed_a = checkpointed_a[:-1]
+            checkpointed_b = checkpointed_b[:-1]
+
             ctx.args = (n_iters, checkpoint_segments, eps)
             ctx.save_for_backward(x, y, k, mask, checkpointed_a, checkpointed_b)
 
@@ -398,12 +397,9 @@ class _coor_descent(autograd.Function):
 
         mask_int = mask.int()
 
-        a = torch.zeros_like(k)
-        b = -x
-
         items = zip(
-            reversed([a, *checkpointed_a.unbind(dim = 0)]),
-            reversed([b, *checkpointed_b.unbind(dim = 0)]),
+            reversed(checkpointed_a.unbind(dim = 0)),
+            reversed(checkpointed_b.unbind(dim = 0)),
             reversed(num_to_groups(n_iters, checkpoint_segments))
         )
 
@@ -417,14 +413,11 @@ class _coor_descent(autograd.Function):
                 ds,
                 db,
                 k,
-                dk.stride(0),
                 x.stride(0),
-                init_a.stride(0),
                 init_b.stride(0),
                 mask_int.stride(0),
                 ds.stride(0),
                 db.stride(0),
-                k.stride(0),
                 segment_iters,
                 eps,
                 n_cols,
