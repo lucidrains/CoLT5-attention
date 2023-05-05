@@ -206,12 +206,13 @@ class CoordinateDescentRouter(nn.Module):
         self,
         dim,
         straight_through = True,
-        n_iters = 50,           # 50 iterations in the paper
-        fetch_k_ratio = 9 / 8,  # in the paper, they do a bit slightly higher k (times this ratio) for better learning
-        eps = 1.,               # the epsilon for coordinate descent. in CoLT5 paper they used 1. apparently
+        n_iters = 50,                   # 50 iterations in the paper
+        fetch_k_ratio = 9 / 8,          # in the paper, they do a bit slightly higher k (times this ratio) for better learning
+        eps = 1.,                       # the epsilon for coordinate descent. in CoLT5 paper they used 1. apparently
         num_routing_tokens = 1,
         use_triton = False,
-        route_block_size = None
+        route_block_size = None,
+        triton_checkpoint_segments = 4  # whether to recompute the coordinate descent in segments, with 4 and 50 iterations, backwards is sped up 3x times at the expense of forwards and some memory for saving initial a and b
     ):
         super().__init__()
         assert fetch_k_ratio >= 1.
@@ -224,7 +225,7 @@ class CoordinateDescentRouter(nn.Module):
 
         if use_triton:
             from colt5_attention.triton_coor_descent import triton_coor_descent
-            self.coor_descent = triton_coor_descent
+            self.coor_descent = partial(triton_coor_descent, checkpoint_segments = triton_checkpoint_segments)
 
         self.is_one_routing_token = num_routing_tokens == 1
         self.num_routing_tokens = num_routing_tokens

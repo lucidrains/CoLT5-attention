@@ -25,6 +25,9 @@ assert version.parse(triton.__version__) >= version.parse('2.0')
 def exists(val):
     return val is not None
 
+def default(val, d):
+    return val if exists(val) else d
+
 def calc_num_warps(block_size):
     num_warps = 4
     if block_size >= 2048:
@@ -38,6 +41,16 @@ def pack_one(t, pattern):
 
 def unpack_one(t, ps, pattern):
     return unpack(t, ps, pattern)[0]    
+
+def num_to_groups(num, groups):
+    assert 0 < groups <= num
+    floor = num // groups
+    remainder = num % groups
+    out = []
+    for ind in range(groups):
+        out.append(floor + int(ind < remainder))
+    assert sum(out) == num
+    return out
 
 # forwards
 
@@ -282,12 +295,13 @@ class _coor_descent(autograd.Function):
         n_iters,
         k,
         eps,
-        mask
+        mask,
+        checkpoint_segments
     ):
         assert n_iters > 0
         assert x.is_cuda, 'triton coordinate descent must be on cuda'
 
-        batch, requires_grad = x.shape[0], x.requires_grad
+        batch, requires_grad, device = x.shape[0], x.requires_grad, x.device
 
         if not exists(mask):
             mask = torch.ones_like(x, dtype = torch.bool, device = x.device)
@@ -316,29 +330,40 @@ class _coor_descent(autograd.Function):
         a = torch.zeros_like(k)
         b = -x
 
-        coor_descent_kernel_forward[(n_rows,)](
-            a,
-            b,
-            x,
-            mask_ints,
-            k,
-            a.stride(0),
-            b.stride(0),
-            x.stride(0),
-            mask_ints.stride(0),
-            k.stride(0),
-            n_iters,
-            eps,
-            n_cols,
-            num_warps = num_warps,
-            BLOCK_SIZE = BLOCK_SIZE,
-        )
+        checkpoint_in_segments = checkpoint_segments > 1
+        checkpointed_a = torch.empty((checkpoint_segments - 1, n_rows), device = device, dtype = a.dtype)
+        checkpointed_b = torch.empty((checkpoint_segments - 1, n_rows, n_cols), device = device, dtype = b.dtype)
+
+        for ind, segment_iters in enumerate(num_to_groups(n_iters, checkpoint_segments)):
+            is_first = 0
+
+            if not is_first and checkpoint_in_segments:
+                checkpointed_a[ind - 1] = a
+                checkpointed_b[ind - 1] = b
+
+            coor_descent_kernel_forward[(n_rows,)](
+                a,
+                b,
+                x,
+                mask_ints,
+                k,
+                a.stride(0),
+                b.stride(0),
+                x.stride(0),
+                mask_ints.stride(0),
+                k.stride(0),
+                segment_iters,
+                eps,
+                n_cols,
+                num_warps = num_warps,
+                BLOCK_SIZE = BLOCK_SIZE,
+            )
 
         y = torch.exp((a[..., None] + b + x) / eps)
 
         if requires_grad:
-            ctx.args = (n_iters, eps)
-            ctx.save_for_backward(x, y, k, mask)
+            ctx.args = (n_iters, checkpoint_segments, eps)
+            ctx.save_for_backward(x, y, k, mask, checkpointed_a, checkpointed_b)
 
         y = unpack_one(y, shape, '* n')
 
@@ -354,22 +379,21 @@ class _coor_descent(autograd.Function):
 
         batch = grad_probs.shape[0]
 
-        n_iters, eps = ctx.args
-        x, y, k, mask = ctx.saved_tensors
+        n_iters, checkpoint_segments, eps = ctx.args
+        x, y, k, mask, checkpointed_a, checkpointed_b = ctx.saved_tensors
 
         grad_probs, shape = pack_one(grad_probs, '* n')
 
         if exists(mask):
             grad_probs = grad_probs.masked_fill(~mask, 0.)
 
-        ds = grad_probs * y / eps
-        db = ds.clone()
-
         n_rows, n_cols = grad_probs.shape
 
         BLOCK_SIZE = triton.next_power_of_2(n_cols)
         num_warps = calc_num_warps(BLOCK_SIZE)
 
+        ds = grad_probs * y / eps
+        db = ds.clone()
         dk = torch.zeros_like(k)
 
         mask_int = mask.int()
@@ -377,29 +401,36 @@ class _coor_descent(autograd.Function):
         a = torch.zeros_like(k)
         b = -x
 
-        coor_descent_kernel_backward[(n_rows,)](
-            dk,
-            x,
-            a,
-            b,
-            mask_int,
-            ds,
-            db,
-            k,
-            dk.stride(0),
-            x.stride(0),
-            a.stride(0),
-            b.stride(0),
-            mask_int.stride(0),
-            ds.stride(0),
-            db.stride(0),
-            k.stride(0),
-            n_iters,
-            eps,
-            n_cols,
-            num_warps = num_warps,
-            BLOCK_SIZE = BLOCK_SIZE
+        items = zip(
+            reversed([a, *checkpointed_a.unbind(dim = 0)]),
+            reversed([b, *checkpointed_b.unbind(dim = 0)]),
+            reversed(num_to_groups(n_iters, checkpoint_segments))
         )
+
+        for init_a, init_b, segment_iters, in items:
+            coor_descent_kernel_backward[(n_rows,)](
+                dk,
+                x,
+                init_a,
+                init_b,
+                mask_int,
+                ds,
+                db,
+                k,
+                dk.stride(0),
+                x.stride(0),
+                init_a.stride(0),
+                init_b.stride(0),
+                mask_int.stride(0),
+                ds.stride(0),
+                db.stride(0),
+                k.stride(0),
+                segment_iters,
+                eps,
+                n_cols,
+                num_warps = num_warps,
+                BLOCK_SIZE = BLOCK_SIZE
+            )
 
         ds += -db
         ds = unpack_one(ds, shape, '* n')
@@ -409,7 +440,7 @@ class _coor_descent(autograd.Function):
         else:
             dk *= eps / k
 
-        return ds, None, dk, None, None
+        return ds, None, dk, None, None, None
 
 def triton_coor_descent(
     s,
@@ -417,9 +448,10 @@ def triton_coor_descent(
     n_iters,
     k,
     eps = 1e-1,
-    mask = None
+    mask = None,
+    checkpoint_segments = 1
 ):
     if not s.is_cuda:
         return coor_descent(s, n_iters = n_iters, k = k, eps = eps, mask = mask)
 
-    return _coor_descent.apply(s, n_iters, k, eps, mask)
+    return _coor_descent.apply(s, n_iters, k, eps, mask, checkpoint_segments)
