@@ -1,6 +1,7 @@
 from colt5_attention.transformer_block import (
     ConditionalRoutedFeedForward,
     ConditionalRoutedAttention,
+    ConditionalRoutedImageAttention,
     ConditionalRoutedAutoregressiveAttention,
     ConditionalRoutedCrossAttention,
     ConditionalRoutedTransformerBlock,

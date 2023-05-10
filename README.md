@@ -124,7 +124,7 @@ cross_attn_out = cross_attn(
 cross_attn_out.shape # (1, 1024, 512) - same as tokens
 ```
 
-Finally, this repository also has an improvised version for autoregressive attention. The way this was achieved was by viewing the sequence in windows. Each window can only attend to windows of key / values into the past. The local attention of the light branch covers the intra-window attention.
+This repository also has an improvised version for autoregressive attention. The way this was achieved was by viewing the sequence in windows. Each window can only attend to windows of key / values into the past. The local attention of the light branch covers the intra-window attention.
 
 The coordinate descent is made viable through a CUDA kernel written in <a href="https://github.com/openai/triton">Triton</a>. Finally, to get autoregressive generation to work well, I had to make sure for the unrouted tokens (for queries), outputs a learned output embedding rather than just zeros.
 
@@ -160,6 +160,30 @@ attn = ConditionalRoutedAutoregressiveAttention(
 attn_out = attn(tokens) + tokens # (2, 8192, 512) - output of attention with residual (prenorm is included)
 ```
 
+Finally, this repository contains a version for image feature maps. Typically a lot of research papers cannot do attention on image feature maps with dimensions greater than 32 by 32. This routed attention will use a local window patch for the light branch, and routed attention for the heavy
+
+ex.
+
+```python
+import torch
+from colt5_attention import ConditionalRoutedImageAttention
+
+attn = ConditionalRoutedImageAttention(
+    dim = 32,
+    light_dim_head = 64,       # attention head dimension of light branch
+    light_heads = 8,           # number of attention heads for light branch
+    light_window_size = 32,    # height and width of local window attention on the image feature map
+    heavy_dim_head = 64,       # attention head dimension of heavy branch
+    heavy_heads = 8,           # number of attention heads for heavy branch
+    num_heavy_tokens_q = 1024, # heavy branch receives only 1024 routed tokens of 65536
+    num_heavy_tokens_kv = 1024 # heavy branch receives only 1024 routed tokens of 65536
+).cuda()
+
+fmap = torch.randn(1, 32, 256, 256).cuda() # image feature map is too large for attention, given 256 ^ 2  == 65536 tokens
+
+out = attn(fmap)
+```
+
 ## Todo
 
 - [x] add the coordinate descent method as another router
@@ -167,6 +191,7 @@ attn_out = attn(tokens) + tokens # (2, 8192, 512) - output of attention with res
 - [x] add an autoregressive version of the conditionally routed attention
 - [x] test out the autoregressive version and verify that more routed key / value tokens lead to better results - it works
 - [x] make flash attention compatible
+- [x] create a variant of CoLT5 for high resolution feature maps (image attention) - then try out for diffusion
 - [x] fused coordinate descent kernel using triton
     - [x] forwards        
     - [x] backwards
@@ -179,8 +204,6 @@ attn_out = attn(tokens) + tokens # (2, 8192, 512) - output of attention with res
     - [x] remove sinkhorn and cumulative softmax approaches and cleanup; neither can work as well as coordinate descent
     - [x] allow for saving intermediates every number of iterations - trading memory for recompute efficiency during backwards
     - [x] in-place write to checkpointed a and b tensor for potentially savings on forward when recompute segments is high
-
-- [ ] create a variant of CoLT5 for high resolution feature maps (image attention) - then try out for diffusion
 
 ## Citations
 

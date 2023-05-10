@@ -73,6 +73,46 @@ def FeedForward(dim, mult = 4):
         nn.Linear(dim_hidden, dim)
     )
 
+class SelfAttention(nn.Module):
+    def __init__(
+        self,
+        dim,
+        dim_head = 64,
+        heads = 8,
+        use_flash = False,
+        prenorm = False
+    ):
+        super().__init__()
+        self.heads = heads
+        self.scale = dim_head ** -0.5
+        dim_hidden = dim_head * heads
+
+        self.norm = RMSNorm(dim) if prenorm else nn.Identity()
+
+        self.attend = Attend(use_flash = use_flash)
+
+        self.to_qkv = nn.Linear(dim, dim_hidden * 3, bias = False)
+        self.to_out = nn.Linear(dim_hidden, dim, bias = False)
+
+    def forward(self, x):
+        h = self.heads
+
+        x = self.norm(x)
+
+        # get queries, keys, values
+
+        q, k, v = self.to_qkv(x).chunk(3, dim = -1)
+        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
+
+        # attention
+
+        out = self.attend(q, k, v)
+
+        # merge heads
+
+        out = rearrange(out, 'b h n d -> b n (h d)')
+        return self.to_out(out)
+
 class Attention(nn.Module):
     def __init__(
         self,
@@ -516,6 +556,142 @@ class ConditionalRoutedAttention(nn.Module):
             heavy_out = torch.zeros_like(x)
 
         heavy_out = self.q_router.route_back(heavy_out, routed_tokens_out, indices_q)
+
+        # sum light and heavy branches
+
+        return light_out + heavy_out
+
+# conditionally routed image feature map attention
+
+class ConditionalRoutedImageAttention(nn.Module):
+    def __init__(
+        self,
+        dim,
+        *,
+        num_heavy_tokens_q,
+        num_heavy_tokens_kv,
+        num_routed_kv = 1,
+        light_dim_head = 64,
+        light_heads = 8,
+        light_window_size = 128,        # each token would see ~ 64 tokens either way to left or right
+        heavy_dim_head = 64,
+        heavy_heads = 8,
+        router_straight_through = True, # would make sure all normalized scores are 1., still differentiable
+        router_kwargs: dict = {},
+        multiply_keys_by_score = False,
+        multiply_queries_by_score = False,
+        use_triton = False,
+        use_null_q_tokens = True,
+        use_flash_attn = False
+    ):
+        super().__init__()
+
+        if use_triton:
+            router_kwargs = {**router_kwargs, 'use_triton': True}
+
+        self.num_heavy_tokens_q = num_heavy_tokens_q
+        self.num_heavy_tokens_kv = num_heavy_tokens_kv
+
+        self.multiply_queries_by_score = multiply_queries_by_score
+
+        self.light_window_size = light_window_size
+
+        self.light_attn = SelfAttention(
+            dim = dim,
+            dim_head = light_dim_head,
+            heads = light_heads,
+            prenorm = True
+        )
+
+        self.null_q_token = None
+        if use_null_q_tokens:
+            self.null_q_token = nn.Parameter(torch.randn(dim)) # for the query tokens not selected by the router, give it a learned output embed
+
+        self.q_router = CoordinateDescentRouter(
+            dim = dim,
+            straight_through = router_straight_through,
+            **router_kwargs
+        )
+
+        self.kv_router = CoordinateDescentRouter(
+            dim = dim,
+            num_routing_tokens = num_routed_kv,
+            straight_through = router_straight_through,
+            **router_kwargs
+        )
+
+        self.heavy_attn = Attention(
+            dim = dim,
+            dim_head = heavy_dim_head,
+            heads = heavy_heads,
+            multiply_keys_by_score = multiply_keys_by_score,
+            use_flash = use_flash_attn
+        )
+
+    def forward(
+        self,
+        x,
+        *,
+        num_heavy_tokens_q = None,
+        num_heavy_tokens_kv = None,
+        mask = None
+    ):
+        batch, device, w = x.shape[0], x.device, self.light_window_size
+
+        num_heavy_tokens_q = default(num_heavy_tokens_q, self.num_heavy_tokens_q)
+        num_heavy_tokens_kv = default(num_heavy_tokens_kv, self.num_heavy_tokens_kv)
+
+        # light local attention sees all tokens in a limited context
+
+        light_input = rearrange(x, 'b d (h p1) (w p2) -> b h w (p1 p2) d', p1 = w, p2 = w)
+        x, ps = pack_one(light_input, '* n d')
+
+        light_out = self.light_attn(x)
+        light_out = unpack_one(light_out, ps, '* n d')
+        light_out = rearrange(light_out, 'b h w (p1 p2) d -> b d (h p1) (w p2)', p1 = w, p2 = w)
+
+        # route tokens appropriately for heavy branch
+
+        normalized_scores_q, indices_q = self.q_router(x, num_tokens = num_heavy_tokens_q, mask = mask)
+        normalized_scores_kv, indices_kv = self.kv_router(x, num_tokens = num_heavy_tokens_kv, mask = mask)
+
+        # select the tokens to be routed to full attention
+
+        routed_tokens_q = batched_gather(x, indices_q)
+
+        kv_batch_range = create_batch_range(x, right_pad_dims = indices_kv.ndim - 1)
+        routed_tokens_kv = batched_gather(x, indices_kv)
+
+        # calculate key padding mask
+
+        routed_tokens_kv_mask = None
+        if exists(mask):
+            routed_tokens_kv_mask = mask[kv_batch_range, indices_kv]
+
+        # do the heavier branch with only routed tokens
+
+        routed_tokens_out = self.heavy_attn(
+            routed_tokens_q,
+            mask = routed_tokens_kv_mask,
+            context = routed_tokens_kv,
+            normalized_scores_kv = normalized_scores_kv,
+            normalized_scores_q = normalized_scores_q if self.multiply_queries_by_score else None
+        )
+
+        routed_tokens_out = routed_tokens_out * rearrange(normalized_scores_q, '... -> ... 1')
+
+        # scatter back the output of the heavy branch
+
+        if exists(self.null_q_token):
+            heavy_out = rearrange(self.null_q_token, 'd -> 1 1 d')
+            heavy_out = heavy_out.expand_as(x).clone()
+        else:
+            heavy_out = torch.zeros_like(x)
+
+        heavy_out = self.q_router.route_back(heavy_out, routed_tokens_out, indices_q)
+
+        heavy_out = unpack_one(heavy_out, ps, '* n d')
+        heavy_out = rearrange(heavy_out, 'b h w (p1 p2) d -> b d (h p1) (w p2)', p1 = w, p2 = w)
 
         # sum light and heavy branches
 
