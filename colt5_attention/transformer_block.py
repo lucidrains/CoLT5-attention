@@ -285,7 +285,8 @@ class CoordinateDescentRouter(nn.Module):
         x,
         *,
         num_tokens,
-        mask = None
+        mask = None,
+        random_route = False
     ):
         n, device, eps, num_routes, route_block_size = x.shape[-2], x.device, self.eps, self.num_routing_tokens, self.route_block_size
 
@@ -337,6 +338,12 @@ class CoordinateDescentRouter(nn.Module):
             k = k,
             eps = eps
         )
+
+        # force random routing, if negative control
+
+        if random_route:
+            scores = torch.randn_like(scores)
+            scores = scores.masked_fill(~mask, -torch.finfo(scores.dtype).max)
 
         # get the topk scores and indices from the sparse matrix
 
@@ -774,7 +781,8 @@ class ConditionalRoutedAutoregressiveAttention(nn.Module):
         x,
         *,
         num_heavy_tokens_q = None,
-        num_heavy_tokens_kv = None
+        num_heavy_tokens_kv = None,
+        random_route = False
     ):
         batch, device = x.shape[0], x.device
 
@@ -827,7 +835,7 @@ class ConditionalRoutedAutoregressiveAttention(nn.Module):
         should_route_kv = kv.shape[-2] > num_heavy_tokens_kv
 
         if should_route_q:
-            normalized_scores_q, indices_q = self.q_router(q, num_tokens = num_heavy_tokens_q, mask = q_mask)
+            normalized_scores_q, indices_q = self.q_router(q, num_tokens = num_heavy_tokens_q, mask = q_mask, random_route = random_route)
 
             routed_tokens_q = batched_gather(q, indices_q)
         else:
@@ -835,7 +843,7 @@ class ConditionalRoutedAutoregressiveAttention(nn.Module):
             routed_tokens_q = q
 
         if should_route_kv:
-            normalized_scores_kv, indices_kv = self.kv_router(kv, num_tokens = num_heavy_tokens_kv, mask = kv_mask)
+            normalized_scores_kv, indices_kv = self.kv_router(kv, num_tokens = num_heavy_tokens_kv, mask = kv_mask, random_route = random_route)
 
             routed_tokens_kv = batched_gather(kv, indices_kv)
             routed_tokens_kv_mask = batched_gather(kv_mask, indices_kv)
