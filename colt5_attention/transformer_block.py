@@ -250,6 +250,7 @@ class CoordinateDescentRouter(nn.Module):
         fetch_k_ratio = 9 / 8,          # in the paper, they do a bit slightly higher k (times this ratio) for better learning
         eps = 1.,                       # the epsilon for coordinate descent. in CoLT5 paper they used 1. apparently
         num_routing_tokens = 1,
+        learned_routing_tokens = False,
         use_triton = False,
         route_block_size = None,
         triton_checkpoint_segments = 4  # whether to recompute the coordinate descent in segments, with 4 and 50 iterations, backwards is sped up 3x times at the expense of forwards and some memory for saving initial a and b
@@ -272,7 +273,7 @@ class CoordinateDescentRouter(nn.Module):
 
         self.route_block_size = route_block_size
 
-        self.routing_token = nn.Parameter(torch.randn(num_routing_tokens, dim))
+        self.routing_token = nn.Parameter(torch.randn(num_routing_tokens, dim)) if not learned_routing_tokens else None
         self.straight_through = straight_through
 
     def route_back(self, src, routed_tokens, indices):
@@ -286,7 +287,8 @@ class CoordinateDescentRouter(nn.Module):
         *,
         num_tokens,
         mask = None,
-        random_route = False
+        random_route = False,
+        routing_tokens = None
     ):
         n, device, eps, num_routes, route_block_size = x.shape[-2], x.device, self.eps, self.num_routing_tokens, self.route_block_size
 
@@ -313,7 +315,15 @@ class CoordinateDescentRouter(nn.Module):
 
         # s stands for eventual normalized score
 
-        s = einsum('b n d, r d -> b r n', x, self.routing_token)
+        if exists(self.routing_token):
+            s = einsum('b n d, r d -> b r n', x, self.routing_token)
+        else:
+            assert exists(routing_tokens)
+
+            if routing_tokens.ndim == 2:
+                routing_tokens = rearrange(routing_tokens, 'b d -> b 1 d')
+
+            s = einsum('b n d, b r d -> b r n', x, routing_tokens)
 
         # merge routing dimension into batch
 
