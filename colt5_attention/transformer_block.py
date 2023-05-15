@@ -296,6 +296,25 @@ class CoordinateDescentRouter(nn.Module):
     ):
         n, device, eps, num_routes, route_block_size = x.shape[-2], x.device, self.eps, self.num_routing_tokens, self.route_block_size
 
+        # do not route if the sequence length is less than the number of tokens
+
+        if n < num_tokens:
+            b = x.shape[0]
+            r = self.num_routing_tokens
+
+            if not self.is_one_routing_token:
+                scores_shape = (b, r, n)
+
+                x = repeat(x, 'b n d -> b r n d', r = r)
+
+                if exists(mask):
+                    mask = repeat(mask, 'b n -> b r n', r = r)
+            else:
+                scores_shape = (b, n)
+
+            scores = torch.ones(scores_shape, device = device, dtype = x.dtype)
+            return RouterReturn(None, scores, x, mask)
+
         # whether to route even amounts from blocks of the sequence
 
         if exists(route_block_size):
@@ -828,18 +847,9 @@ class ConditionalRoutedAutoregressiveAttention(nn.Module):
         should_route_q = q.shape[-2] > num_heavy_tokens_q
         should_route_kv = kv.shape[-2] > num_heavy_tokens_kv
 
-        if should_route_q:
-            indices_q, normalized_scores_q, routed_tokens_q, _ = self.q_router(q, num_tokens = num_heavy_tokens_q, mask = q_mask, random_route = random_route)
-        else:
-            normalized_scores_q = 1.
-            routed_tokens_q = q
+        indices_q, normalized_scores_q, routed_tokens_q, _ = self.q_router(q, num_tokens = num_heavy_tokens_q, mask = q_mask, random_route = random_route)
 
-        if should_route_kv:
-            indices_kv, normalized_scores_kv, routed_tokens_kv, routed_tokens_kv_mask = self.kv_router(kv, num_tokens = num_heavy_tokens_kv, mask = kv_mask, random_route = random_route)
-        else:
-            normalized_scores_kv = 1.
-            routed_tokens_kv = kv
-            routed_tokens_kv_mask = kv_mask
+        indices_kv, normalized_scores_kv, routed_tokens_kv, routed_tokens_kv_mask = self.kv_router(kv, num_tokens = num_heavy_tokens_kv, mask = kv_mask, random_route = random_route)
 
         # do the heavier branch with only routed tokens
 
@@ -851,7 +861,7 @@ class ConditionalRoutedAutoregressiveAttention(nn.Module):
             normalized_scores_q = normalized_scores_q if self.multiply_queries_by_score else None
         )
 
-        if should_route_q:
+        if exists(indices_q):
             routed_tokens_out = routed_tokens_out * rearrange(normalized_scores_q, '... -> ... 1')
 
             # scatter back the output of the heavy branch
@@ -949,11 +959,7 @@ class ConditionalRoutedCrossAttention(nn.Module):
         query_length = x.shape[-2]
         num_tokens_q = default(num_tokens_q, self.num_tokens_q)
 
-        routed_tokens_q = x
-        should_route_queries = query_length > num_tokens_q
-
-        if should_route_queries:
-            indices_q, normalized_scores_q, routed_tokens_q, _ = self.q_router(x, num_tokens = num_tokens_q, mask = mask)
+        indices_q, normalized_scores_q, routed_tokens_q, _ = self.q_router(x, num_tokens = num_tokens_q, mask = mask)
 
         # route the long contexts
 
@@ -994,7 +1000,8 @@ class ConditionalRoutedCrossAttention(nn.Module):
         else:
             out = torch.zeros_like(x)
 
-        out = self.q_router.route_back(out, routed_tokens_out, indices_q)
+        if exists(indices_q):
+            out = self.q_router.route_back(out, routed_tokens_out, indices_q)
 
         return out
 
