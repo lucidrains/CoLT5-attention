@@ -249,9 +249,11 @@ class CoordinateDescentRouter(nn.Module):
         self,
         dim,
         straight_through = True,
-        n_iters = 50,                   # 50 iterations in the paper
+        n_iters = 20,                   # 20 iterations in a new paper, utilizing ε-scaling
         fetch_k_ratio = 9 / 8,          # in the paper, they do a bit slightly higher k (times this ratio) for better learning
-        eps = 1.,                       # the epsilon for coordinate descent. in CoLT5 paper they used 1. apparently
+        eps = 0.03,                     # the epsilon for coordinate descent. in a recent paper, they used 0.03 for text and 1.0 for speech
+        eps_decay = 0.7,
+        eps_init = 4.,
         num_routing_tokens = 1,
         learned_routing_tokens = False,
         use_triton = False,
@@ -260,12 +262,17 @@ class CoordinateDescentRouter(nn.Module):
     ):
         super().__init__()
         assert fetch_k_ratio >= 1.
-        self.eps = eps
 
         self.n_iters = n_iters
         self.fetch_k_ratio = fetch_k_ratio
 
         self.coor_descent = coor_descent
+
+        # epsilon related hparams, for ε-scaling
+
+        self.eps = eps
+        self.eps_decay = eps_decay
+        self.eps_init = eps_init
 
         if use_triton:
             from colt5_attention.triton_coor_descent import triton_coor_descent
@@ -294,7 +301,7 @@ class CoordinateDescentRouter(nn.Module):
         random_route = False,
         routing_tokens = None
     ):
-        n, device, eps, num_routes, route_block_size = x.shape[-2], x.device, self.eps, self.num_routing_tokens, self.route_block_size
+        n, device, eps, eps_init, eps_decay, num_routes, route_block_size = x.shape[-2], x.device, self.eps, self.eps_init, self.eps_decay, self.num_routing_tokens, self.route_block_size
 
         # do not route if the sequence length is less than the number of tokens
 
@@ -369,7 +376,9 @@ class CoordinateDescentRouter(nn.Module):
             n_iters = self.n_iters,
             mask = mask,
             k = k,
-            eps = eps
+            eps = eps,
+            eps_init = eps_init,
+            eps_decay = eps_decay
         )
 
         # force random routing, if negative control

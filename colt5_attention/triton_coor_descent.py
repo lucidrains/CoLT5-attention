@@ -67,6 +67,8 @@ def coor_descent_kernel_forward(
     input_row_stride,
     mask_row_stride,
     n_iters,
+    current_eps,
+    eps_decay,
     eps,
     n_cols,
     BLOCK_SIZE: tl.constexpr
@@ -105,13 +107,11 @@ def coor_descent_kernel_forward(
 
     # initialize some constants
 
-    constant = tl.log(k) * eps
-
-    inv_eps = 1. / eps
+    logk = tl.log(k)
 
     for _ in range(n_iters):        
 
-        a = (s + b) * inv_eps
+        a = (s + b) / current_eps
         a = tl.where(mask, a, -float('inf'))
 
         # stable log sum exp
@@ -122,12 +122,19 @@ def coor_descent_kernel_forward(
         sum_exp = tl.sum(exp, axis = 0)
         log_sum_exp = tl.log(sum_exp) + a_max
 
-        a = constant - eps * log_sum_exp
+        a = current_eps * (logk - log_sum_exp)
 
         # update b
 
         b = s + a
         b = tl.where(b >= 0., -b, 0.)
+
+        # decay epsilon, from epsilon-scaling
+
+        current_eps *= eps_decay
+
+        if current_eps < eps:
+            current_eps = eps
 
     # store a and b for next round
 
@@ -155,6 +162,8 @@ def coor_descent_kernel_backward(
     ds_row_stride,
     db_row_stride,
     n_iters,
+    eps_init,
+    eps_decay,
     eps,
     n_cols,
     BLOCK_SIZE: tl.constexpr
@@ -195,7 +204,7 @@ def coor_descent_kernel_backward(
     k_ptr = k_ptr + row_idx
 
     k = tl.load(k_ptr)
-    constant = tl.log(k) * eps
+    logk = tl.log(k)
 
     # load initial ds
 
@@ -218,7 +227,6 @@ def coor_descent_kernel_backward(
 
     # temp variables
 
-    inv_eps = 1. / eps
     last_da = tl.sum(ds, axis = 0)
 
     # backwards
@@ -230,11 +238,23 @@ def coor_descent_kernel_backward(
         sa = s * 0
         softmax = s * 0
 
+        # calculate epsilon
+
+        current_eps = eps_init / eps_decay
+
         # recompute
 
         for _ in range(n_iters - ind):
+            # update epsilon
 
-            sb = (s + b) * inv_eps
+            current_eps *= eps_decay
+
+            if current_eps < eps:
+                current_eps = eps
+
+            # updating a
+
+            sb = (s + b) / current_eps
             sb = tl.where(mask, sb, -float('inf'))
 
             # stable log sum exp
@@ -246,7 +266,7 @@ def coor_descent_kernel_backward(
             softmax = exp / sum_exp
             log_sum_exp = tl.log(sum_exp) + sb_max
 
-            a = constant - eps * log_sum_exp
+            a = current_eps * (logk - log_sum_exp)
 
             # update b
 
@@ -261,7 +281,7 @@ def coor_descent_kernel_backward(
 
         da = tl.sum(dsa, axis = 0) + last_da
 
-        dk += da
+        dk += da * current_eps
 
         dsb = da * -softmax
 
@@ -295,6 +315,8 @@ class _coor_descent(autograd.Function):
         n_iters,
         k,
         eps,
+        eps_init,
+        eps_decay,
         mask,
         checkpoint_segments
     ):
@@ -311,6 +333,10 @@ class _coor_descent(autograd.Function):
 
         x = x.masked_fill(~mask, -torch.finfo(x.dtype).max)
         mask_ints = mask.int()
+
+        epsilons = []
+        eps_init = default(eps_init, eps)
+        current_eps = float(max(eps_init, eps))
 
         n_rows, n_cols = x.shape
 
@@ -336,6 +362,8 @@ class _coor_descent(autograd.Function):
         for ind, segment_iters in enumerate(num_to_groups(n_iters, checkpoint_segments)):
             is_last = ind == (checkpoint_segments - 1)
 
+            epsilons.append(current_eps)
+
             coor_descent_kernel_forward[(n_rows,)](
                 checkpointed_a[ind],
                 checkpointed_b[ind],
@@ -348,20 +376,27 @@ class _coor_descent(autograd.Function):
                 x.stride(0),
                 mask_ints.stride(0),
                 segment_iters,
+                current_eps,
+                eps_decay,
                 eps,
                 n_cols,
                 num_warps = num_warps,
                 BLOCK_SIZE = BLOCK_SIZE,
             )
 
+            current_eps *= (eps_decay ** segment_iters)
+            current_eps = max(current_eps, eps)
+
         last_a, last_b = map(lambda t: t[-1], (checkpointed_a, checkpointed_b))
-        y = torch.exp((last_a[..., None] + last_b + x) / eps)
+        y = torch.exp((last_a[..., None] + last_b + x) / current_eps)
+
+        epsilons.append(current_eps)
 
         if requires_grad:
             checkpointed_a = checkpointed_a[:-1]
             checkpointed_b = checkpointed_b[:-1]
 
-            ctx.args = (n_iters, checkpoint_segments, eps)
+            ctx.args = (n_iters, checkpoint_segments, epsilons, eps_decay, eps)
             ctx.save_for_backward(x, y, k, mask, checkpointed_a, checkpointed_b)
 
         y = unpack_one(y, shape, '* n')
@@ -378,7 +413,7 @@ class _coor_descent(autograd.Function):
 
         batch = grad_probs.shape[0]
 
-        n_iters, checkpoint_segments, eps = ctx.args
+        n_iters, checkpoint_segments, epsilons, eps_decay, eps = ctx.args
         x, y, k, mask, checkpointed_a, checkpointed_b = ctx.saved_tensors
 
         grad_probs, shape = pack_one(grad_probs, '* n')
@@ -391,7 +426,9 @@ class _coor_descent(autograd.Function):
         BLOCK_SIZE = triton.next_power_of_2(n_cols)
         num_warps = calc_num_warps(BLOCK_SIZE)
 
-        ds = grad_probs * y / eps
+        *epsilons, last_eps = epsilons
+
+        ds = grad_probs * y / last_eps
         db = ds.clone()
         dk = torch.zeros_like(k)
 
@@ -400,10 +437,11 @@ class _coor_descent(autograd.Function):
         items = zip(
             reversed(checkpointed_a.unbind(dim = 0)),
             reversed(checkpointed_b.unbind(dim = 0)),
-            reversed(num_to_groups(n_iters, checkpoint_segments))
+            reversed(num_to_groups(n_iters, checkpoint_segments)),
+            reversed(epsilons)
         )
 
-        for init_a, init_b, segment_iters, in items:
+        for init_a, init_b, segment_iters, eps_init, in items:
             coor_descent_kernel_backward[(n_rows,)](
                 dk,
                 x,
@@ -419,6 +457,8 @@ class _coor_descent(autograd.Function):
                 ds.stride(0),
                 db.stride(0),
                 segment_iters,
+                eps_init,
+                eps_decay,
                 eps,
                 n_cols,
                 num_warps = num_warps,
@@ -431,9 +471,9 @@ class _coor_descent(autograd.Function):
         if not k.requires_grad:
             dk = None
         else:
-            dk *= eps / k
+            dk /= k
 
-        return ds, None, dk, None, None, None
+        return ds, None, dk, None, None, None, None, None
 
 def triton_coor_descent(
     s,
@@ -441,10 +481,12 @@ def triton_coor_descent(
     n_iters,
     k,
     eps = 1e-1,
+    eps_init = None,
+    eps_decay = 1.,
     mask = None,
     checkpoint_segments = 1
 ):
     if not s.is_cuda:
-        return coor_descent(s, n_iters = n_iters, k = k, eps = eps, mask = mask)
+        return coor_descent(s, n_iters = n_iters, k = k, eps = eps, eps_init = eps_init, eps_decay = eps_decay, mask = mask)
 
-    return _coor_descent.apply(s, n_iters, k, eps, mask, checkpoint_segments)
+    return _coor_descent.apply(s, n_iters, k, eps, eps_init, eps_decay, mask, checkpoint_segments)

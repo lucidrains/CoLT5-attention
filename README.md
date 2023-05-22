@@ -232,3 +232,13 @@ out = attn(fmap)
     year      = {2022}
 }
 ```
+
+```bibtex
+@article{Lei2023ConditionalAP,
+    title   = {Conditional Adapters: Parameter-efficient Transfer Learning with Fast Inference},
+    author  = {Tao Lei and Junwen Bai and Siddhartha Brahma and Joshua Ainslie and Kenton Lee and Yanqi Zhou and Nan Du and Vincent Zhao and Yuexin Wu and Bo Li and Yu Zhang and Ming-Wei Chang},
+    journal = {ArXiv},
+    year    = {2023},
+    volume  = {abs/2304.04947}
+}
+```
