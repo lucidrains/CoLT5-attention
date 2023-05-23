@@ -624,9 +624,11 @@ class ConditionalRoutedImageAttention(nn.Module):
         multiply_queries_by_score = False,
         use_triton = False,
         use_null_q_tokens = True,
-        use_flash_attn = False
+        use_flash_attn = False,
+        channel_first = False
     ):
         super().__init__()
+        self.channel_first = channel_first
 
         if use_triton:
             router_kwargs = {**router_kwargs, 'use_triton': True}
@@ -678,19 +680,23 @@ class ConditionalRoutedImageAttention(nn.Module):
         num_heavy_tokens_kv = None,
         mask = None
     ):
-        batch, device, w = x.shape[0], x.device, self.light_window_size
+        assert x.ndim == 4
+        batch, device, channel_first, w = x.shape[0], x.device, self.channel_first, self.light_window_size
+
+        if channel_first:
+            x = rearrange(x, 'b d ... -> b ... d')
 
         num_heavy_tokens_q = default(num_heavy_tokens_q, self.num_heavy_tokens_q)
         num_heavy_tokens_kv = default(num_heavy_tokens_kv, self.num_heavy_tokens_kv)
 
         # light local attention sees all tokens in a limited context
 
-        light_input = rearrange(x, 'b d (h p1) (w p2) -> b h w (p1 p2) d', p1 = w, p2 = w)
+        light_input = rearrange(x, 'b (h p1) (w p2) d -> b h w (p1 p2) d', p1 = w, p2 = w)
         x, ps = pack_one(light_input, '* n d')
 
         light_out = self.light_attn(x)
         light_out = unpack_one(light_out, ps, '* n d')
-        light_out = rearrange(light_out, 'b h w (p1 p2) d -> b d (h p1) (w p2)', p1 = w, p2 = w)
+        light_out = rearrange(light_out, 'b h w (p1 p2) d -> b (h p1) (w p2) d', p1 = w, p2 = w)
 
         # route tokens appropriately for heavy branch
 
@@ -720,11 +726,16 @@ class ConditionalRoutedImageAttention(nn.Module):
         heavy_out = self.q_router.route_back(heavy_out, routed_tokens_out, indices_q)
 
         heavy_out = unpack_one(heavy_out, ps, '* n d')
-        heavy_out = rearrange(heavy_out, 'b h w (p1 p2) d -> b d (h p1) (w p2)', p1 = w, p2 = w)
+        heavy_out = rearrange(heavy_out, 'b h w (p1 p2) d -> b (h p1) (w p2) d', p1 = w, p2 = w)
 
         # sum light and heavy branches
 
-        return light_out + heavy_out
+        out = light_out + heavy_out
+
+        if channel_first:
+            out = rearrange(out, 'b ... d -> b d ...')
+
+        return out
 
 # improvised conditionally routed autoregressive attention
 

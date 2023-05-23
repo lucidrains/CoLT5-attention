@@ -173,6 +173,7 @@ attn = ConditionalRoutedImageAttention(
     light_dim_head = 64,       # attention head dimension of light branch
     light_heads = 8,           # number of attention heads for light branch
     light_window_size = 32,    # height and width of local window attention on the image feature map
+    channel_first = True,      # whether to accept images with channel first than last
     heavy_dim_head = 64,       # attention head dimension of heavy branch
     heavy_heads = 8,           # number of attention heads for heavy branch
     num_heavy_tokens_q = 1024, # heavy branch receives only 1024 routed tokens of 65536
@@ -182,6 +183,35 @@ attn = ConditionalRoutedImageAttention(
 fmap = torch.randn(1, 32, 256, 256).cuda() # image feature map is too large for attention, given 256 ^ 2  == 65536 tokens
 
 out = attn(fmap)
+```
+
+<a href="https://arxiv.org/abs/2205.01580">Simple ViT</a> using coordinate descent routed attention and feedforward
+
+```python
+import torch
+from colt5_attention.vit import ConditionalRoutedViT
+
+vit = ConditionalRoutedViT(
+    image_size = 256,                # image size
+    patch_size = 32,                 # patch size
+    num_classes = 1000,              # number of output classes
+    dim = 1024,                      # feature dimension
+    depth = 6,                       # depth
+    attn_num_heavy_tokens_q = 16,    # number of routed queries for heavy attention
+    attn_num_heavy_tokens_kv = 16,   # number of routed key/values for heavy attention
+    attn_heavy_dim_head = 64,        # dimension per attention head for heavy
+    attn_heavy_heads = 8,            # number of attention heads for heavy
+    attn_light_window_size = 4,      # the local windowed attention for light branch
+    attn_light_dim_head = 32,        # dimension per head for local light attention
+    attn_light_heads = 4,            # number of attention heads for local windowed attention
+    ff_num_heavy_tokens = 16,        # number of tokens routed for heavy feedforward
+    ff_heavy_mult = 4,               # the expansion factor of the heavy feedforward branch
+    ff_light_mult = 2                # expansion factor of the light feedforward branch
+)
+
+images = torch.randn(1, 3, 256, 256)
+
+logits = vit(images) # (1, 1000)
 ```
 
 ## Todo
@@ -240,5 +270,15 @@ out = attn(fmap)
     journal = {ArXiv},
     year    = {2023},
     volume  = {abs/2304.04947}
+}
+```
+
+```bibtex
+@article{Beyer2022BetterPV,
+    title   = {Better plain ViT baselines for ImageNet-1k},
+    author  = {Lucas Beyer and Xiaohua Zhai and Alexander Kolesnikov},
+    journal = {ArXiv},
+    year    = {2022},
+    volume  = {abs/2205.01580}
 }
 ```
