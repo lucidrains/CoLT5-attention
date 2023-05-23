@@ -120,7 +120,8 @@ class ConditionalRoutedViT(nn.Module):
         router_kwargs: dict = {},
         router_use_triton = False,
         flash_attn = True,
-        attn_num_routed_kv = 1
+        attn_num_routed_kv = 1,
+        default_coor_descent_eps = 1.
     ):
         super().__init__()
         image_height, image_width = pair(image_size)
@@ -137,6 +138,11 @@ class ConditionalRoutedViT(nn.Module):
             nn.Linear(patch_dim, dim),
             nn.LayerNorm(dim),
         )
+
+        # not sure what the correct epsilon is for images, but for a recent paper, they used 1. for speech, 0.02 for text
+        # images are probably closer to speech than to text
+
+        router_kwargs = {'eps': default_coor_descent_eps, **router_kwargs}
 
         self.transformer = Transformer(
             dim,
