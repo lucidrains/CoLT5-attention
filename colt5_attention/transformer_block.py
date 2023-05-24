@@ -299,17 +299,20 @@ class CoordinateDescentRouter(nn.Module):
         num_tokens,
         mask = None,
         random_route = False,
-        routing_tokens = None
+        routing_tokens = None,
+        keep_one_route_dim = False  # if only one route, whether to keepdim
     ):
         n, device, eps, eps_init, eps_decay, num_routes, route_block_size = x.shape[-2], x.device, self.eps, self.eps_init, self.eps_decay, self.num_routing_tokens, self.route_block_size
 
         # do not route if the sequence length is less than the number of tokens
 
+        has_route_dim = keep_one_route_dim or not self.is_one_routing_token
+
         if n < num_tokens:
             b = x.shape[0]
             r = self.num_routing_tokens
 
-            if not self.is_one_routing_token:
+            if has_route_dim:
                 scores_shape = (b, r, n)
 
                 x = repeat(x, 'b n d -> b r n d', r = r)
@@ -400,7 +403,7 @@ class CoordinateDescentRouter(nn.Module):
 
         # split out routing dimension again if need be
 
-        if not self.is_one_routing_token:
+        if has_route_dim:
             selected_scores = unpack_one(selected_scores, ps, '* n')
             selected_indices = unpack_one(selected_indices, ps, '* n')
 

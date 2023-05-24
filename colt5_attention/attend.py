@@ -123,7 +123,8 @@ class Attend(nn.Module):
         # key padding mask
 
         if exists(mask):
-            mask = rearrange(mask, 'b j -> b 1 1 j')
+            if mask.ndim != 4:
+                mask = rearrange(mask, 'b j -> b 1 1 j')
             sim = sim.masked_fill(~mask, -torch.finfo(sim.dtype).max)
 
         # causal mask
