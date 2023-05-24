@@ -342,8 +342,8 @@ class _coor_descent(autograd.Function):
 
         if isinstance(k, (int, float)):
             k = torch.full((n_rows,), k)
-        elif k.ndim == 1:
-            k = repeat(k, 'n -> (b n)', b = x.shape[0] // k.shape[0])
+
+        assert k.numel() == n_rows
 
         k = k.to(x)
 

@@ -276,7 +276,7 @@ class CoordinateDescentRouter(nn.Module):
 
         if use_triton:
             from colt5_attention.triton_coor_descent import triton_coor_descent
-            triton_checkpoint_segments = default(triton_checkpoint_segments, n_iters // 10)
+            triton_checkpoint_segments = default(triton_checkpoint_segments, n_iters // 5)
             self.coor_descent = partial(triton_coor_descent, checkpoint_segments = triton_checkpoint_segments)
 
         self.is_one_routing_token = num_routing_tokens == 1
@@ -320,6 +320,7 @@ class CoordinateDescentRouter(nn.Module):
                 scores_shape = (b, n)
 
             scores = torch.ones(scores_shape, device = device, dtype = x.dtype)
+
             return RouterReturn(None, scores, x, mask)
 
         # whether to route even amounts from blocks of the sequence
@@ -367,15 +368,13 @@ class CoordinateDescentRouter(nn.Module):
 
         effective_k = min(num_tokens * self.fetch_k_ratio, n)
 
-        k = torch.tensor([effective_k], device = device)
-
         # coordinate descent
 
         scores = self.coor_descent(
             s,
             n_iters = self.n_iters,
             mask = mask,
-            k = k,
+            k = effective_k,
             eps = eps,
             eps_init = eps_init,
             eps_decay = eps_decay
