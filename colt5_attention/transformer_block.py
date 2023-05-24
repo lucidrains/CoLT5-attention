@@ -421,7 +421,7 @@ class CoordinateDescentRouter(nn.Module):
 
         routed_mask = None
         if exists(mask):
-            route_mask = batched_gather(mask, selected_indices)
+            routed_mask = batched_gather(mask, selected_indices)
 
         # return indices, scores, routed tokens and mask
 
