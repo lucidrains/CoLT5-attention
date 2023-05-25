@@ -43,6 +43,12 @@ def batched_gather(x, indices):
     batch_range = create_batch_range(indices, indices.ndim - 1)
     return x[batch_range, indices]
 
+def identity(t):
+    return t
+
+def l2norm(t):
+    return F.normalize(t, dim = -1)
+
 # tensor helpers
 
 def create_batch_range(t, right_pad_dims = 1):
@@ -257,6 +263,8 @@ class CoordinateDescentRouter(nn.Module):
         num_routing_tokens = 1,
         learned_routing_tokens = False,
         use_triton = False,
+        cosine_sim_routing = False,
+        cosine_sim_scale = 8,
         route_block_size = None,
         triton_checkpoint_segments = None # whether to recompute the coordinate descent in segments, with 4 and 50 iterations, backwards is sped up 3x times at the expense of forwards and some memory for saving initial a and b
     ):
@@ -286,6 +294,11 @@ class CoordinateDescentRouter(nn.Module):
 
         self.routing_token = nn.Parameter(torch.randn(num_routing_tokens, dim)) if not learned_routing_tokens else None
         self.straight_through = straight_through
+
+        # whether to use cosine sim for routing
+
+        self.cosine_sim_routing = cosine_sim_routing
+        self.cosine_sim_scale = cosine_sim_scale
 
     def route_back(self, src, routed_tokens, indices):
         batch_range = create_batch_range(routed_tokens)
@@ -349,15 +362,20 @@ class CoordinateDescentRouter(nn.Module):
 
         # s stands for eventual normalized score
 
+        maybe_l2norm = l2norm if self.cosine_sim_routing else identity
+
         if exists(self.routing_token):
-            s = einsum('b n d, r d -> b r n', x, self.routing_token)
+            s = einsum('b n d, r d -> b r n', maybe_l2norm(x), maybe_l2norm(self.routing_token))
         else:
             assert exists(routing_tokens)
 
             if routing_tokens.ndim == 2:
                 routing_tokens = rearrange(routing_tokens, 'b d -> b 1 d')
 
-            s = einsum('b n d, b r d -> b r n', x, routing_tokens)
+            s = einsum('b n d, b r d -> b r n', maybe_l2norm(x), maybe_l2norm(routing_tokens))
+
+        if self.cosine_sim_routing:
+            s = s * self.cosine_sim_scale
 
         # merge routing dimension into batch
 
