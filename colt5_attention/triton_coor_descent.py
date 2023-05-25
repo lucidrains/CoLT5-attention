@@ -117,7 +117,7 @@ def coor_descent_kernel_forward(
         # stable log sum exp
 
         a_max = tl.max(a, axis = 0)
-        a_minus_max = a - a_max
+        a_minus_max = tl.where(mask, a - a_max, -float('inf'))
         exp = tl.exp(a_minus_max)
         sum_exp = tl.sum(exp, axis = 0)
         log_sum_exp = tl.log(sum_exp) + a_max
@@ -260,7 +260,7 @@ def coor_descent_kernel_backward(
             # stable log sum exp
 
             sb_max = tl.max(sb, axis = 0)
-            sb_minus_max = sb - sb_max
+            sb_minus_max = tl.where(mask, sb - sb_max, -float('inf'))
             exp = tl.exp(sb_minus_max)
             sum_exp = tl.sum(exp, axis = 0)
             softmax = exp / sum_exp
@@ -296,13 +296,11 @@ def coor_descent_kernel_backward(
 
     # store ds
 
-    ds = tl.where(mask, ds, 0.)
-    tl.store(ds_ptrs, ds)
+    tl.store(ds_ptrs, ds, mask = col_mask)
 
     # store db
 
-    db = tl.where(mask, db, 0.)
-    tl.store(db_ptrs, db)
+    tl.store(db_ptrs, db, mask = col_mask)
 
 # function forwards and backwards
 
