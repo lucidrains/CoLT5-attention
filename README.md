@@ -214,6 +214,19 @@ images = torch.randn(1, 3, 256, 256)
 logits = vit(images) # (1, 1000)
 ```
 
+## Differentiable Topk
+
+Use a small wrapper around coordinate descent for differentiable `topk`
+
+```python
+import torch
+from colt5_attention import topk as differentiable_topk
+
+x = torch.randn(1024, 512)
+
+values, indices, coor_descent_values = differentiable_topk(x, k = 10, fused = True)
+```
+
 ## Todo
 
 - [x] add the coordinate descent method as another router

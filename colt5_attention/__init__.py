@@ -9,5 +9,6 @@ from colt5_attention.transformer_block import (
 )
 
 from colt5_attention.coor_descent import coor_descent
+from colt5_attention.topk import topk
 
 from colt5_attention.vit import ConditionalRoutedViT
