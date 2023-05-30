@@ -19,6 +19,7 @@ def topk(
     differentiable top-k on last dimension
     """
     assert coor_descent_k_ratio >= 1.
+    assert k > 0
 
     # whether to used fused kernel or not
 
@@ -32,7 +33,7 @@ def topk(
 
     coor_descent_out = fn(
         x,
-        k = k * coor_descent_k_ratio,   # fetch a bit more for better learning, as in CoLT5 paper (they fetched 9 / 8 times more)
+        k = min(k * coor_descent_k_ratio, x.shape[-1]),   # fetch a bit more for better learning, as in CoLT5 paper (they fetched 9 / 8 times more)
         mask = mask,
         n_iters = n_iters,
         eps = eps,
