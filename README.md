@@ -220,11 +220,13 @@ Use a small wrapper around coordinate descent for differentiable `topk`
 
 ```python
 import torch
-from colt5_attention import topk as differentiable_topk
+from colt5_attention import topk
 
 x = torch.randn(1024, 512)
 
-values, indices, coor_descent_values = differentiable_topk(x, k = 10, fused = True)
+values, indices, coor_descent_values, gates = topk(x, k = 10, fused = True)
+
+# you can either use the topk indices + gates, or use the values directly (values have already been multiplied with the gates within the function)
 ```
 
 ## Todo

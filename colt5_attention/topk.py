@@ -2,7 +2,7 @@ import torch
 from collections import namedtuple
 from colt5_attention.coor_descent import coor_descent
 
-TopkReturn = namedtuple('TopkReturn', ['values', 'indices', 'coor_descent_values'])
+TopkReturn = namedtuple('TopkReturn', ['values', 'indices', 'coor_descent_values', 'gates'])
 
 def topk(
     x,
@@ -43,9 +43,9 @@ def topk(
 
     # do straight through
 
-    gate = coor_descent_out + (1 - coor_descent_out).detach()    
+    gates = coor_descent_out + (1 - coor_descent_out).detach()
 
-    x = x * gate
+    x = x * gates
 
     # hard topk
 
@@ -54,5 +54,6 @@ def topk(
     # return something that looks like a usual topk, but now differentiable
 
     coor_descent_values = coor_descent_out.gather(-1, indices)
+    gates = gates.gather(-1, indices)
 
-    return TopkReturn(values, indices, coor_descent_values)
+    return TopkReturn(values, indices, coor_descent_values, gates)
