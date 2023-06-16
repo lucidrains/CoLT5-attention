@@ -25,7 +25,7 @@ def topk(
 
     fn = coor_descent
 
-    if fused:
+    if fused and x.is_cuda:
         from colt5_attention.triton_coor_descent import triton_coor_descent
         fn = triton_coor_descent
 
