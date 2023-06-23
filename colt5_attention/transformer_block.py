@@ -363,7 +363,7 @@ class CoordinateDescentRouter(nn.Module):
 
         has_route_dim = keep_one_route_dim or not self.is_one_routing_token
 
-        if n < num_tokens:
+        if n <= num_tokens:
             b = x.shape[0]
             r = self.num_routing_tokens
 
@@ -966,15 +966,15 @@ class ConditionalRoutedAutoregressiveAttention(nn.Module):
         if exists(self.rotary_emb):
             seq_rotary_emb = self.rotary_emb(padded_seq_len)
 
-            if exists(indices_q):
-                windowed_rotary_emb = rearrange(seq_rotary_emb, '(n w) d -> n w d', w = window_size)
-                windowed_rotary_emb = windowed_rotary_emb[1:]
-                windowed_rotary_emb = repeat(windowed_rotary_emb, 'n w d -> (b n) w d', b = batch)
+            windowed_rotary_emb = rearrange(seq_rotary_emb, '(n w) d -> n w d', w = window_size)
+            windowed_rotary_emb = windowed_rotary_emb[1:]
+            windowed_rotary_emb = repeat(windowed_rotary_emb, 'n w d -> (b n) w d', b = batch)
 
+            if exists(indices_q):
                 rotary_indices_q = repeat(indices_q, '... -> ... d', d = windowed_rotary_emb.shape[-1])
                 q_rotary_emb = windowed_rotary_emb.gather(1, rotary_indices_q)
             else:
-                q_rotary_emb = seq_rotary_emb
+                q_rotary_emb = windowed_rotary_emb
 
             q_rotary_emb = rearrange(q_rotary_emb, 'b n d -> b 1 n d')
             k_rotary_emb = rearrange(seq_rotary_emb[indices_kv], '... n d -> ... 1 n d') if exists(indices_kv) else seq_rotary_emb
