@@ -4,7 +4,9 @@ from collections import namedtuple
 
 import torch
 import torch.nn.functional as F
-from torch import nn, einsum
+from torch import Tensor, nn, einsum
+
+from typing import Tuple, Optional
 
 from local_attention import LocalMHA
 from einops import rearrange, repeat, pack, unpack
@@ -56,6 +58,32 @@ def create_batch_range(t, right_pad_dims = 1):
     batch_range = torch.arange(b, device = device)
     pad_dims = ((1,) * right_pad_dims)
     return batch_range.reshape(-1, *pad_dims)
+
+# rotary positional embeddign
+# https://arxiv.org/abs/2104.09864
+
+class RotaryEmbedding(nn.Module):
+    def __init__(self, dim, theta = 10000):
+        super().__init__()
+        inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer('inv_freq', inv_freq)
+
+    @property
+    def device(self):
+        return next(self.buffers()).device
+
+    def forward(self, seq_len):
+        t = torch.arange(seq_len, device = self.device).type_as(self.inv_freq)
+        freqs = torch.einsum('i , j -> i j', t, self.inv_freq)
+        freqs = torch.cat((freqs, freqs), dim = -1)
+        return freqs
+
+def rotate_half(x):
+    x1, x2 = x.chunk(2, dim=-1)
+    return torch.cat((-x2, x1), dim=-1)
+
+def apply_rotary_pos_emb(pos, t):
+    return t * pos.cos() + rotate_half(t) * pos.sin()
 
 # normalization
 
@@ -151,7 +179,8 @@ class Attention(nn.Module):
         context = None,
         mask = None,
         normalized_scores_kv = None,
-        normalized_scores_q = None
+        normalized_scores_q = None,
+        rotary_emb: Optional[Tuple[Tensor, Tensor]] = None
     ):
         """
         einops:
@@ -209,6 +238,19 @@ class Attention(nn.Module):
 
             if self.multiply_keys_by_score:
                 k = k * normalized_scores_kv
+
+        # apply rotary embeddings if needed
+
+        if exists(rotary_emb):
+            q_rotary_emb, k_rotary_emb = rotary_emb
+            q = apply_rotary_pos_emb(q_rotary_emb, q)
+
+            if k_rotary_emb.ndim == 4:
+                k_rotary_emb = repeat(k_rotary_emb, 'b 1 n d -> b r 1 n d', r = k.shape[1])
+
+            k = apply_rotary_pos_emb(k_rotary_emb, k)
+
+        # merge routing dimension with heads for key / values
 
         k, v = map(lambda t: rearrange(t, 'b r h n d -> b (r h) n d'), (k, v))
 
@@ -525,7 +567,8 @@ class ConditionalRoutedAttention(nn.Module):
         multiply_queries_by_score = False,
         use_triton = False,
         use_null_q_tokens = True,
-        use_flash_attn = False
+        use_flash_attn = False,
+        rotary_emb = False
     ):
         super().__init__()
 
@@ -574,6 +617,10 @@ class ConditionalRoutedAttention(nn.Module):
             use_flash = use_flash_attn
         )
 
+        # rotary embedding
+
+        self.rotary_emb = RotaryEmbedding(heavy_dim_head) if rotary_emb else None
+
     def forward(
         self,
         x,
@@ -582,11 +629,10 @@ class ConditionalRoutedAttention(nn.Module):
         num_heavy_tokens_kv = None,
         mask = None
     ):
-        batch, device = x.shape[0], x.device
+        batch, seq, device = *x.shape[:2], x.device
 
         num_heavy_tokens_q = default(num_heavy_tokens_q, self.num_heavy_tokens_q)
         num_heavy_tokens_kv = default(num_heavy_tokens_kv, self.num_heavy_tokens_kv)
-
 
         # light local attention sees all tokens in a limited context
 
@@ -597,12 +643,23 @@ class ConditionalRoutedAttention(nn.Module):
         indices_q, normalized_scores_q, routed_tokens_q, _ = self.q_router(x, num_tokens = num_heavy_tokens_q, mask = mask)
         indices_kv, normalized_scores_kv, routed_tokens_kv, routed_tokens_kv_mask = self.kv_router(x, num_tokens = num_heavy_tokens_kv, mask = mask)
 
+        # get rotary embeddings if specified
+
+        rotary_emb = None
+
+        if exists(self.rotary_emb):
+            seq_rotary_emb = self.rotary_emb(seq)
+            q_rotary_emb = rearrange(seq_rotary_emb[indices_q], 'b n d -> b 1 n d')
+            k_rotary_emb = rearrange(seq_rotary_emb[indices_kv], '... n d -> ... 1 n d')
+            rotary_emb = (q_rotary_emb, k_rotary_emb)
+
         # do the heavier branch with only routed tokens
 
         routed_tokens_out = self.heavy_attn(
             routed_tokens_q,
             mask = routed_tokens_kv_mask,
             context = routed_tokens_kv,
+            rotary_emb = rotary_emb,
             normalized_scores_kv = normalized_scores_kv,
             normalized_scores_q = normalized_scores_q if self.multiply_queries_by_score else None
         )
@@ -779,7 +836,8 @@ class ConditionalRoutedAutoregressiveAttention(nn.Module):
         multiply_queries_by_score = False,
         use_triton = False,
         use_null_q_tokens = True,
-        use_flash_attn = False
+        use_flash_attn = False,
+        rotary_emb = False
     ):
         super().__init__()
 
@@ -829,6 +887,10 @@ class ConditionalRoutedAutoregressiveAttention(nn.Module):
             use_flash = use_flash_attn
         )
 
+        # rotary embedding
+
+        self.rotary_emb = RotaryEmbedding(heavy_dim_head) if rotary_emb else None
+
     def forward(
         self,
         x,
@@ -837,7 +899,7 @@ class ConditionalRoutedAutoregressiveAttention(nn.Module):
         num_heavy_tokens_kv = None,
         random_route = False
     ):
-        batch, device = x.shape[0], x.device
+        batch, seq, device = *x.shape[:2], x.device
 
         num_heavy_tokens_q = default(num_heavy_tokens_q, self.num_heavy_tokens_q)
         num_heavy_tokens_kv = default(num_heavy_tokens_kv, self.num_heavy_tokens_kv)
@@ -891,12 +953,23 @@ class ConditionalRoutedAutoregressiveAttention(nn.Module):
 
         indices_kv, normalized_scores_kv, routed_tokens_kv, routed_tokens_kv_mask = self.kv_router(kv, num_tokens = num_heavy_tokens_kv, mask = kv_mask, random_route = random_route)
 
+        # get rotary embeddings if specified
+
+        rotary_emb = None
+
+        if exists(self.rotary_emb):
+            seq_rotary_emb = self.rotary_emb(seq)
+            q_rotary_emb = rearrange(seq_rotary_emb[indices_q], 'b n d -> b 1 n d')
+            k_rotary_emb = rearrange(seq_rotary_emb[indices_kv], '... n d -> ... 1 n d')
+            rotary_emb = (q_rotary_emb, k_rotary_emb)
+
         # do the heavier branch with only routed tokens
 
         routed_tokens_out = self.heavy_attn(
             routed_tokens_q,
             mask = routed_tokens_kv_mask,
             context = routed_tokens_kv,
+            rotary_emb = rotary_emb,
             normalized_scores_kv = normalized_scores_kv,
             normalized_scores_q = normalized_scores_q if self.multiply_queries_by_score else None
         )
