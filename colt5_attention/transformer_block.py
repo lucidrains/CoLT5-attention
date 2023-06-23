@@ -540,9 +540,12 @@ class ConditionalRoutedFeedForward(nn.Module):
 
         # scatter back the output of the heavy feedforward branch
 
-        heavy_out = torch.zeros_like(x)
+        if exists(indices):
+            heavy_out = torch.zeros_like(x)
 
-        heavy_out = self.router.route_back(heavy_out, routed_tokens_out, indices)
+            heavy_out = self.router.route_back(heavy_out, routed_tokens_out, indices)
+        else:
+            heavy_out = routed_tokens_out
 
         # sum light and heavy branches
 
@@ -649,8 +652,8 @@ class ConditionalRoutedAttention(nn.Module):
 
         if exists(self.rotary_emb):
             seq_rotary_emb = self.rotary_emb(seq)
-            q_rotary_emb = rearrange(seq_rotary_emb[indices_q], 'b n d -> b 1 n d')
-            k_rotary_emb = rearrange(seq_rotary_emb[indices_kv], '... n d -> ... 1 n d')
+            q_rotary_emb = rearrange(seq_rotary_emb[indices_q], 'b n d -> b 1 n d') if exists(indices_q) else seq_rotary_emb
+            k_rotary_emb = rearrange(seq_rotary_emb[indices_kv], '... n d -> ... 1 n d') if exists(indices_kv) else seq_rotary_emb
             rotary_emb = (q_rotary_emb, k_rotary_emb)
 
         # do the heavier branch with only routed tokens
@@ -668,13 +671,16 @@ class ConditionalRoutedAttention(nn.Module):
 
         # scatter back the output of the heavy branch
 
-        if exists(self.null_q_token):
-            heavy_out = rearrange(self.null_q_token, 'd -> 1 1 d')
-            heavy_out = heavy_out.expand_as(x).clone()
-        else:
-            heavy_out = torch.zeros_like(x)
+        if exists(indices_q):
+            if exists(self.null_q_token):
+                heavy_out = rearrange(self.null_q_token, 'd -> 1 1 d')
+                heavy_out = heavy_out.expand_as(x).clone()
+            else:
+                heavy_out = torch.zeros_like(x)
 
-        heavy_out = self.q_router.route_back(heavy_out, routed_tokens_out, indices_q)
+            heavy_out = self.q_router.route_back(heavy_out, routed_tokens_out, indices_q)
+        else:
+            heavy_out = routed_tokens_out
 
         # sum light and heavy branches
 
@@ -958,9 +964,20 @@ class ConditionalRoutedAutoregressiveAttention(nn.Module):
         rotary_emb = None
 
         if exists(self.rotary_emb):
-            seq_rotary_emb = self.rotary_emb(seq)
-            q_rotary_emb = rearrange(seq_rotary_emb[indices_q], 'b n d -> b 1 n d')
-            k_rotary_emb = rearrange(seq_rotary_emb[indices_kv], '... n d -> ... 1 n d')
+            seq_rotary_emb = self.rotary_emb(padded_seq_len)
+
+            if exists(indices_q):
+                windowed_rotary_emb = rearrange(seq_rotary_emb, '(n w) d -> n w d', w = window_size)
+                windowed_rotary_emb = windowed_rotary_emb[1:]
+                windowed_rotary_emb = repeat(windowed_rotary_emb, 'n w d -> (b n) w d', b = batch)
+
+                rotary_indices_q = repeat(indices_q, '... -> ... d', d = windowed_rotary_emb.shape[-1])
+                q_rotary_emb = windowed_rotary_emb.gather(1, rotary_indices_q)
+            else:
+                q_rotary_emb = seq_rotary_emb
+
+            q_rotary_emb = rearrange(q_rotary_emb, 'b n d -> b 1 n d')
+            k_rotary_emb = rearrange(seq_rotary_emb[indices_kv], '... n d -> ... 1 n d') if exists(indices_kv) else seq_rotary_emb
             rotary_emb = (q_rotary_emb, k_rotary_emb)
 
         # do the heavier branch with only routed tokens
