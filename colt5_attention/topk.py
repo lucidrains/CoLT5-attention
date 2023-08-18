@@ -13,11 +13,17 @@ def topk(
     eps_init = None,
     eps_decay = 1.,
     mask = None,
-    fused = False
+    fused = False,
+    non_differentiable = False
 ):
     """
     differentiable top-k on last dimension
     """
+
+    if non_differentiable:
+        values, indices = torch.topk(x, k = k, dim = -1)
+        return TopkReturn(values, indices, None, None)
+
     assert coor_descent_k_ratio >= 1.
     assert k > 0
 
