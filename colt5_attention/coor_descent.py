@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+from torch.cuda.amp import autocast
 
 from einops import rearrange
 
@@ -12,6 +13,7 @@ def default(val, d):
 def log(t, eps = 1e-20):
     return torch.log(t.clamp(min = eps))
 
+@autocast(enabled = False)
 def coor_descent(
     s,
     *,
