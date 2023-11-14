@@ -157,6 +157,7 @@ def coor_descent_kernel_backward(
     ds_ptr,
     db_ptr,
     k_ptr,
+    last_da_ptr,
     input_row_stride,
     b_row_stride,
     mask_row_stride,
@@ -207,6 +208,12 @@ def coor_descent_kernel_backward(
     k = tl.load(k_ptr)
     logk = tl.log(k)
 
+    # load last da
+
+    last_da_ptr = last_da_ptr + row_idx
+
+    last_da = tl.load(last_da_ptr)
+
     # load initial ds
 
     ds_row_start_ptr = ds_ptr + row_idx * ds_row_stride
@@ -225,10 +232,6 @@ def coor_descent_kernel_backward(
 
     dk_ptr = dk_ptr + row_idx
     dk = tl.load(dk_ptr)
-
-    # temp variables
-
-    last_da = tl.sum(ds, axis = 0)
 
     # backwards
 
@@ -289,7 +292,7 @@ def coor_descent_kernel_backward(
         ds += dsb
         db = dsb
 
-        last_da = 0.
+        last_da *= 0.
 
     # store dk
 
@@ -430,6 +433,7 @@ class _coor_descent(autograd.Function):
         ds = grad_probs * y / last_eps
         db = ds.clone()
         dk = torch.zeros_like(k)
+        last_da = ds.sum(dim = -1)
 
         mask_int = mask.int()
 
@@ -440,7 +444,9 @@ class _coor_descent(autograd.Function):
             reversed(epsilons)
         )
 
-        for init_a, init_b, segment_iters, eps_init, in items:
+        for ind, (init_a, init_b, segment_iters, eps_init) in enumerate(items):
+            is_first = ind == 0
+
             coor_descent_kernel_backward[(n_rows,)](
                 dk,
                 x,
@@ -450,6 +456,7 @@ class _coor_descent(autograd.Function):
                 ds,
                 db,
                 k,
+                last_da if is_first else torch.zeros_like(last_da),
                 x.stride(0),
                 init_b.stride(0),
                 mask_int.stride(0),
