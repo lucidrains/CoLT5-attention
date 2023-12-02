@@ -4,7 +4,7 @@ import torch
 from torch import Tensor
 from torch import autograd
 import torch.nn.functional as F
-from torch.cuda.amp import autocast
+from torch.cuda.amp import autocast, custom_fwd, custom_bwd
 
 from colt5_attention.coor_descent import coor_descent
 from einops import pack, unpack, repeat
@@ -309,7 +309,8 @@ def coor_descent_kernel_backward(
 # function forwards and backwards
 
 class _coor_descent(autograd.Function):
-    @classmethod
+    @staticmethod
+    @custom_fwd
     def forward(
         self,
         ctx,
@@ -405,7 +406,8 @@ class _coor_descent(autograd.Function):
 
         return y
 
-    @classmethod
+    @staticmethod
+    @custom_bwd
     def backward(
         self,
         ctx,
