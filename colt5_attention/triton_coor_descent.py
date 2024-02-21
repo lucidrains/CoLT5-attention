@@ -312,7 +312,6 @@ class _coor_descent(autograd.Function):
     @staticmethod
     @custom_fwd
     def forward(
-        self,
         ctx,
         x,
         n_iters,
@@ -409,7 +408,6 @@ class _coor_descent(autograd.Function):
     @staticmethod
     @custom_bwd
     def backward(
-        self,
         ctx,
         grad_probs
     ):
