@@ -559,6 +559,7 @@ class ConditionalRoutedAttention(nn.Module):
         num_heavy_tokens_q,
         num_heavy_tokens_kv,
         num_routed_kv = 1,
+        has_light_attn = True,
         light_dim_head = 64,
         light_heads = 8,
         light_window_size = 128,        # each token would see ~ 64 tokens either way to left or right
@@ -583,17 +584,20 @@ class ConditionalRoutedAttention(nn.Module):
 
         self.multiply_queries_by_score = multiply_queries_by_score
 
-        self.light_attn = LocalMHA(
-            dim = dim,
-            dim_head = light_dim_head,
-            heads = light_heads,
-            window_size = light_window_size // 2,
-            prenorm = True,
-            causal = False,
-            use_rotary_pos_emb = False,
-            look_backward = 1,
-            look_forward = 1
-        )
+        self.light_attn = None
+
+        if has_light_attn:
+            self.light_attn = LocalMHA(
+                dim = dim,
+                dim_head = light_dim_head,
+                heads = light_heads,
+                window_size = light_window_size // 2,
+                prenorm = True,
+                causal = False,
+                use_rotary_pos_emb = False,
+                look_backward = 1,
+                look_forward = 1
+            )
 
         self.null_q_token = None
         if use_null_q_tokens:
@@ -639,7 +643,10 @@ class ConditionalRoutedAttention(nn.Module):
 
         # light local attention sees all tokens in a limited context
 
-        light_out = self.light_attn(x, mask = mask)
+        light_out = 0.
+
+        if exists(self.light_attn):
+            light_out = self.light_attn(x, mask = mask)
 
         # route tokens appropriately for heavy branch
 
