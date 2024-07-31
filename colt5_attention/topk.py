@@ -1,12 +1,12 @@
 import torch
-from torch.cuda.amp import autocast
+from torch.amp import autocast
 
 from collections import namedtuple
 from colt5_attention.coor_descent import coor_descent
 
 TopkReturn = namedtuple('TopkReturn', ['values', 'indices', 'coor_descent_values', 'gates'])
 
-@autocast(enabled = False)
+@autocast("cuda", enabled = False)
 def topk(
     x,
     k,
