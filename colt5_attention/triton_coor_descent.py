@@ -4,7 +4,7 @@ import torch
 from torch import Tensor
 from torch import autograd
 import torch.nn.functional as F
-from torch.cuda.amp import autocast, custom_fwd, custom_bwd
+from torch.amp import autocast, custom_fwd, custom_bwd
 
 from colt5_attention.coor_descent import coor_descent
 from einops import pack, unpack, repeat
@@ -481,7 +481,7 @@ class _coor_descent(autograd.Function):
 
         return ds, None, dk, None, None, None, None, None
 
-@autocast(enabled = False)
+@autocast("cuda", enabled = False)
 def triton_coor_descent(
     s,
     *,
