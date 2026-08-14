@@ -1,0 +1,57 @@
+[project]
+name = "CoLT5-attention"
+version = "0.11.2"
+description = "Conditionally Routed Attention"
+authors = [
+    { name = "Phil Wang", email = "lucidrains@gmail.com" }
+]
+readme = "README.md"
+requires-python = ">= 3.6"
+license = { file = "LICENSE" }
+keywords = [
+    'artificial intelligence',
+    'attention mechanism',
+    'dynamic routing'
+]
+
+classifiers = [
+    'Development Status :: 4 - Beta',
+    'Intended Audience :: Developers',
+    'Topic :: Scientific/Engineering :: Artificial Intelligence',
+    'License :: OSI Approved :: MIT License',
+    'Programming Language :: Python :: 3.6',
+]
+
+dependencies = [
+    'einops>=0.8.0',
+    'local-attention>=1.8.6',
+    'packaging',
+    'torch>=1.10'
+]
+
+[project.urls]
+Repository = "https://github.com/lucidrains/CoLT5-attention"
+
+[project.optional-dependencies]
+test = [
+    "pytest"
+]
+
+[tool.pytest.ini_options]
+pythonpath = [
+    "."
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+include = [
+    "colt5_attention",
+    "README.md",
+    "LICENSE"
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["colt5_attention"]

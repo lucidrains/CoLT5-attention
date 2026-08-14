@@ -1,21 +1,22 @@
-from math import log
-
 import torch
-from torch import Tensor
 from torch import autograd
-import torch.nn.functional as F
 from torch.amp import autocast
-from torch.cuda.amp import custom_fwd, custom_bwd
+
+try:
+    from torch.amp import custom_fwd as _custom_fwd, custom_bwd as _custom_bwd  # torch >= 2.4
+    custom_fwd = lambda fn: _custom_fwd(fn, device_type = 'cuda')
+    custom_bwd = lambda fn: _custom_bwd(fn, device_type = 'cuda')
+except ImportError:
+    from torch.cuda.amp import custom_fwd, custom_bwd  # torch < 2.4
 
 from colt5_attention.coor_descent import coor_descent
-from einops import pack, unpack, repeat
+from einops import pack, unpack
 
 try:
     import triton
     import triton.language as tl
 except ImportError as e:
-    print('triton is not installed, please install by running `pip install triton -U --pre`')
-    exit()
+    raise ImportError('triton is not installed, please install by running `pip install triton -U --pre`') from e
 
 # make sure it is latest triton
 
@@ -326,7 +327,7 @@ class _coor_descent(autograd.Function):
         assert n_iters > 0
         assert x.is_cuda, 'triton coordinate descent must be on cuda'
 
-        batch, requires_grad, device, dtype = x.shape[0], x.requires_grad, x.device, x.dtype
+        requires_grad, device, dtype = x.requires_grad, x.device, x.dtype
 
         if not exists(mask):
             mask = torch.ones_like(x, dtype = torch.bool, device = x.device)
@@ -345,6 +346,8 @@ class _coor_descent(autograd.Function):
 
         if isinstance(k, (int, float)):
             k = torch.full((n_rows,), k)
+        elif k.ndim == 0 or k.numel() == 1:
+            k = torch.atleast_1d(k).expand(n_rows)
 
         assert k.numel() == n_rows
 
@@ -363,8 +366,6 @@ class _coor_descent(autograd.Function):
         checkpointed_b[0] = -x
 
         for ind, segment_iters in enumerate(num_to_groups(n_iters, checkpoint_segments)):
-            is_last = ind == (checkpoint_segments - 1)
-
             epsilons.append(current_eps)
 
             coor_descent_kernel_forward[(n_rows,)](
@@ -413,8 +414,6 @@ class _coor_descent(autograd.Function):
         grad_probs
     ):
         assert grad_probs.is_cuda
-
-        batch = grad_probs.shape[0]
 
         n_iters, checkpoint_segments, epsilons, eps_decay, eps = ctx.args
         x, y, k, mask, checkpointed_a, checkpointed_b = ctx.saved_tensors
